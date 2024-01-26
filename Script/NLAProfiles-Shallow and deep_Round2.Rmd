@@ -1,0 +1,4207 @@
+---
+title: "NLAProfile shallow and deep"
+author: "Richard LaBrie"
+date: "26/05/2021"
+output: html_document
+---
+
+---
+title: "StrataNLA"
+author: "Richard LaBrie"
+date: "10/09/2020"
+output: html_document
+---
+
+#Load libraries and functions
+```{R}
+suppressMessages(library("oce"))
+suppressMessages(library("rLakeAnalyzer"))
+suppressMessages(library("rMR"))
+suppressMessages(library("missForest"))
+suppressMessages(library("party"))
+suppressMessages(library("randomForest"))
+suppressMessages(library(caret))
+suppressMessages(library(car))
+suppressMessages(library(randomForestExplainer))
+suppressMessages(library(dplyr))
+suppressMessages(library(mlr))
+suppressMessages(library(MASS))
+suppressMessages(library(glmnet))
+suppressMessages(library(ggplot2))
+suppressMessages(library(rattle))
+suppressMessages(library(gridExtra))
+# suppressMessages(library(extrafont))
+usa <- map_data("usa")
+# font_import()
+# loadfonts()
+
+home_strata_fct <- function(FileList, Year)
+{
+  output = matrix(nrow=4, ncol=length(FileList))
+  colnames(output) = FileList
+  for(i in 1:length(FileList))
+  {
+    data = read.csv(paste0("../data/",Year,"/", FileList[i]))
+    filename = unlist(strsplit(FileList[i],split = "[.]"))[1]
+
+  
+    if(length(data$temp[!is.na(data$temp)]) < length(data$temp))    data = data[-which(is.na(data$temp)),]
+    if(length(unique(data$temp) == "NA") == 1)
+    {
+      output[1,i] = -1
+      output[2,i] = -1
+      output[3,i] = -1
+      output[4,i] = -1
+      colnames(output)[i] <- paste(filename)
+      next
+    }
+    temporaire = meta.depths(wtr = data$temp, depths = data$depth)
+  
+    output[1,i] = min(data$depth)
+    output[4,i] = max(data$depth)
+    output[2,i] = if((max(data$temp)-min(data$temp)) > 1) temporaire[1]  else -1
+    output[3,i] = if((max(data$temp)-min(data$temp)) > 1) temporaire[2]  else -1
+    colnames(output)[i] <- paste(filename)
+  }
+return(output)
+}
+
+home_thermo_fct <- function(FileList, Year)
+{
+  output = matrix(nrow=4, ncol=length(FileList))
+  colnames(output) = FileList
+  for(i in 1:length(FileList))
+  {
+    data = read.csv(paste0("../data/Preprocessing/",Year,"/", FileList[i]))
+    data = data[-1,]
+    filename = unlist(strsplit(FileList[i],split = "[.]"))[1]
+
+  
+    if(length(data$temp[!is.na(data$temp)]) < length(data$temp))    data = data[-which(is.na(data$temp)),]
+    if(length(unique(data$temp) == "NA") == 1)
+    {
+      output[1,i] = -1
+      output[2,i] = -1
+      output[3,i] = -1
+      output[4,i] = -1
+      colnames(output)[i] <- paste(filename)
+      next
+    }
+    temporaire = thermo.depth(wtr = data$temp, depths = data$depth)
+  
+    output[1,i] = min(data$depth)
+    output[4,i] = max(data$depth)
+    output[2,i] = if((max(data$temp)-min(data$temp)) > 1) temporaire[1]  else -1
+    output[3,i] = ifelse((max(data$temp)-min(data$temp)) > 1, ifelse(length(data$depth[which(abs(temporaire-data$depth) == min(abs(temporaire-data$depth)))])==2, data$depth[which(abs(temporaire-data$depth) == min(abs(temporaire-data$depth)))][2], data$depth[which(abs(temporaire-data$depth) == min(abs(temporaire-data$depth)))]), -1)
+    colnames(output)[i] <- paste(filename)
+  }
+return(output)
+}
+
+source('./MetalimnionWetzel.R', encoding = 'UTF-8')
+source('./Home_strata_temp.R', encoding = 'UTF-8')
+source('./AOU.R', encoding = 'UTF-8')
+source('./VolAOU.R', encoding = 'UTF-8')
+source('./VolTemp.R', encoding = 'UTF-8')
+source('./SedVar.R', encoding = 'UTF-8')
+source('./Trunc_cone.R', encoding = 'UTF-8')
+source('./deltaT.R', encoding = 'UTF-8')
+source('./LatitudeCorrection.R', encoding = 'UTF-8')
+source('./decimalplaces.R', encoding = 'UTF-8')
+
+makeTransparent<-function(someColor, alpha=100)
+{
+    newColor<-col2rgb(someColor)
+    apply(newColor, 2, function(curcoldata){rgb(red=curcoldata[1], green=curcoldata[2],
+                                                blue=curcoldata[3],alpha=alpha, maxColorValue=255)})
+}
+```
+
+#Load and transform data
+```{r}
+metadata0712 = read.table("../data/info_0712.tsv", sep = "\t", header = T)
+
+#Plot all lakes on a US map
+ggplot(metadata0712,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_fixed(1.3)+
+    geom_point(data=metadata0712,aes(x=lon,y=lat),size=1.4,col="black")+
+  theme(panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "Gray75"),
+      axis.title = element_blank())
+
+#Add mean depth and Shore line development to database
+morpho = read.csv("../data/output_morpho.csv", row.names = 1)
+colnames(morpho)[1] = "site_id"
+
+metadata0712$lMeanDepth = morpho[match(metadata0712$site_id, morpho$site_id),"lMeanDepth"]
+metadata0712$lShorelineDevelopment = morpho[match(metadata0712$site_id, morpho$site_id),"lShorelineDevelopment"]
+metadata0712$MaxDepth = morpho[match(metadata0712$site_id, morpho$site_id),"MaxDepth"]
+
+#Replace : by _ in site_id
+metadata0712$site_id = gsub(":", "_", metadata0712$site_id)
+
+#Remove lakes that looks more like rivers
+
+
+#Temp_sat = read.csv("../nla_noaa-master/data//processed/temp_noaa_output.csv", row.names = 1)
+# allfiles07 = list.files("../data/Preprocessing/2007")
+# allfiles12 = list.files("../data/Preprocessing/2012")
+
+
+#Corriger la latitude en fonction de l'altitude Lewis 1983
+#Un graphique montrant le fitting est disponible dans LatitudeCorrection.R
+metadata0712$Corlat = CorLat.f(metadata0712$lat, metadata0712$elevation_m)
+
+#Select lakes with corrected latitude >40°
+allmore40 = metadata0712[which(metadata0712$Corlat >= 40),]
+
+#Plot all lakes that are more than 40° corrected latitudes
+ggplot(metadata0712,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_fixed(1.3)+
+    geom_point(data=allmore40,aes(x=lon,y=lat),size=1.4,col="black")+
+theme(panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "Gray75"),
+      axis.title = element_blank())
+
+#Split database into ponds and lakes based on max depth 3m, but first make sure there are no NA
+
+#Fill depthmax_m for different dataframe
+
+allmore40$MaxDepth[which(is.na(allmore40$MaxDepth))]=allmore40$depthmax_m[which(is.na(allmore40$MaxDepth))]
+allmore40$depthmax_m = allmore40$sampled_depthmax_m
+allmore40noNA <- allmore40
+
+allmore40noNA <- allmore40noNA[!is.na(allmore40noNA$depthmax_m) & !is.na(allmore40noNA$MaxDepth),]
+
+for(i in 1:length(allmore40noNA$depthmax_m)){
+  if(allmore40noNA$depthmax_m[i] < allmore40noNA$MaxDepth[i]) allmore40noNA$depthmax_m[i]  = allmore40noNA$MaxDepth[i]
+}
+for(i in 1:length(allmore40noNA$depthmax_m)){
+  if(allmore40noNA$depthmax_m[i] ==allmore40noNA$sampled_depthmax_m[i]) allmore40noNA$depthmax_m[i]  = allmore40noNA$depthmax_m[i] + 0.5
+}
+
+#Select deep lakes
+Metadeep0712 = allmore40noNA[which(allmore40noNA$depthmax_m>=3),] #1296 lakes
+#Select shallow lakes
+Metashallow0712 = allmore40noNA[which(allmore40noNA$depthmax_m <3),] #437 ponds
+
+#Remove lakes that looks more like rivers
+Metadeep0712 <- Metadeep0712[-which(Metadeep0712$site_id=="NLA06608-0243" | Metadeep0712$site_id=="NLA06608-1354" | Metadeep0712$site_id=="NLA06608-0562" | Metadeep0712$site_id=="NLA06608-ELS:2B2-008" | Metadeep0712$site_id=="NLA12_SD-183"),] #178:180, 610, 611, 286:288, 869, 1207
+
+
+
+#Separate metadata into 2007 and 2012 files
+Metadeep07 = Metadeep0712[Metadeep0712$year==2007 & Metadeep0712$visit_no==1,] #626 lakes
+#Note. Only lakes #0068 and #0079 shift from oxic to hypoxic in the second visit of 2007
+#If lake 0794 was sampled later, it would likely be anoxic
+Metadeep12 = Metadeep0712[Metadeep0712$year==2012 & Metadeep0712$visit_no==1,] #550 lakes
+
+#Note. Only lakes #0514, #0564, #0982, #1015 shift from oxic to hypoxic in the second visit of 2012
+#Lakes #0611 and #0710 shift from hypoxic to oxic on the 2nd visit (likely polymictic)
+
+Metashallow07 = Metashallow0712[Metashallow0712$year==2007 & Metashallow0712$visit_no==1,] #195 lakes
+Metashallow12 = Metashallow0712[Metashallow0712$year==2012 & Metashallow0712$visit_no==1,] #194 lakes
+
+#Remove lakes without profiles (modifying MaxDepth beforehand removed a lot of lakes that had no profiles)
+#Metadeep07 = Metadeep07[-which(Metadeep07$siteid_07=="NLA06608-0152"),] #Low latitude
+# Metadeep07 = Metadeep07[-which(Metadeep07$siteid_07=="NLA06608-0622"),]
+# Metadeep07 = Metadeep07[-which(Metadeep07$site_id=="NLA06608-EMAP_ME012L"),]
+Metadeep07 = Metadeep07[-which(Metadeep07$site_id=="NLA06608-0761"),]
+Metadeep07 = Metadeep07[-which(Metadeep07$site_id=="NLA06608-1723"),]
+
+
+# Metadeep12 = Metadeep12[-which(Metadeep12$site_id=="NLA06608-0593"),]
+# Metadeep12 = Metadeep12[-which(Metadeep12$site_id=="NLA06608-0761"),]
+# Metadeep12 = Metadeep12[-which(Metadeep12$site_id=="NLA06608-0794"),]
+# Metadeep12 = Metadeep12[-which(Metadeep12$site_id=="NLA06608-0922"),]
+# Metadeep12 = Metadeep12[-which(Metadeep12$site_id=="NLA06608-1989"),]
+# Metadeep12 = Metadeep12[-which(Metadeep12$site_id=="NLA06608-2095"),]
+# Metadeep12 = Metadeep12[-which(Metadeep12$site_id=="NLA06608-2450"),]
+# Metadeep12 = Metadeep12[-which(Metadeep12$site_id=="NLA06608-1723"),]
+#Metadeep12 = Metadeep12[-which(Metadeep12$site_id=="NLA12_FL-123"),] #Low latitude
+
+# Metashallow07 = Metashallow07[-which(Metashallow07$site_id=="NLA06608-1012"),]
+#Metashallow07 = Metashallow07[-which(Metashallow07$site_id=="NLA06608-1432"),] #Low latitude
+#Metashallow07 = Metashallow07[-which(Metashallow07$site_id=="NLA06608-1735"),] #Low latitude
+
+#Metashallow12 = Metashallow12[-which(Metashallow12$site_id=="NLA06608-2492"),] #Low latitude
+#Metashallow12 = Metashallow12[-which(Metashallow12$site_id=="NLA12_MS-116"),] #Low latitude
+#Metashallow12 = Metashallow12[-which(Metashallow12$site_id=="NLA12_SC-112"),] #Low latitude
+
+
+#Select corresponding filenames
+deep07.temp = Metadeep07[,"site_id"] #620 lakes
+deep12.temp = Metadeep12[,"site_id"] #547 lakes
+
+deeplat07 = paste0(deep07.temp, ".csv") #620 lakes deeper than 3m and >40°N
+deeplat12 = paste0(deep12.temp, ".csv") #547 lakes deeper than 3m and >40°N
+
+#For sallow lakes too
+shallow07.temp = Metashallow07[,"site_id"] #195 lakes
+shallow12.temp = Metashallow12[,"site_id"] #194 lakes
+
+shallowlat07 = paste0(shallow07.temp, ".csv") #195 lakes shallower than 2m and >40°N
+shallowlat12 = paste0(shallow12.temp, ".csv") #194 lakes shallower than 2m and >40°N
+
+#remove temporary objects
+rm(deep07.temp, deep12.temp, shallow07.temp, shallow12.temp)
+
+#Replace odd characters in strings
+deeplat07 <- chartr(":", "_", deeplat07)
+deeplat12 <- chartr(":", "_", deeplat12)
+       
+#Hypolimnion
+#calculate metalimnion strata for all lakes in 2007 and 2012
+strata07 = home_strata_temp(deeplat07, 2007)
+strata12 = home_strata_temp(deeplat12, 2012)
+
+
+#Select those that have a hypolimnion
+hypo07 = strata07[,which(strata07[3,] != -1 & strata07[3,] != strata07[4,])] #287 lakes
+hypo12 = strata12[,which(strata12[3,] != -1 & strata12[3,] != strata12[4,])] #213 lakes
+
+#Select those that do not have a hypolimnion
+NoHypo07 <- strata07[,-which(strata07[3,] != -1 & strata07[3,] != strata07[4,])] #287 lakes
+NoHypo12 <- strata12[,-which(strata12[3,] != -1 & strata12[3,] != strata12[4,])] #213 lakes
+
+#Create binary response variable: w/ or w/o hypolimion
+Binhypo07 = strata07[1,]
+Binhypo12 = strata12[1,]
+for(i in 1:length(Binhypo07))
+{
+  Binhypo07[i] = ifelse(strata07[3,i] == -1 | strata07[3,i] == strata07[4,i], "0", "1")
+}
+for(i in 1:length(Binhypo12))
+{
+  Binhypo12[i] = ifelse(strata12[3,i] == -1 | strata12[3,i] == strata12[4,i], "0", "1")
+}
+
+Metadeep07$Binhypo = Binhypo07
+Metadeep12$Binhypo = Binhypo12
+
+
+#Create dataframe with only lakes with stratification
+metadata.hypo07 = Metadeep07[which(strata07[3,] != -1 & strata07[3,] != strata07[4,]),]
+metadata.hypo12 = Metadeep12[which(strata12[3,] != -1 & strata12[3,] != strata12[4,]),]
+
+#Create dataframe with non-hypolimnetic lakes
+metadata.NoHypo07 = Metadeep07[-which(strata07[3,] != -1 & strata07[3,] != strata07[4,]),]
+metadata.NoHypo12 = Metadeep12[-which(strata12[3,] != -1 & strata12[3,] != strata12[4,]),]
+
+#Remove lakes w/o DO measurements
+index07 = list()
+for(i in 1:dim(hypo07)[2])
+{
+  data = read.csv(paste0("../data/Preprocessing/2007/",colnames(hypo07)[i], ".csv"), row.names = 1)
+  if(all(is.na(data$DO))) index07[[i]] = i
+}
+
+index07 = unlist(index07)
+
+index12 = list()
+for(i in 1:dim(hypo12)[2])
+{
+  data = read.csv(paste0("../data/Preprocessing/2012/",colnames(hypo12)[i], ".csv"), row.names = 1)
+  if(all(is.na(data$DO))) index12[[i]] = i
+}
+index12 = unlist(index12)
+# index12 = 214 #DO value only at the surface
+
+#O2sat07 = O2sat07[-index07]
+hypo07 = hypo07[,-index07]
+metadata.hypo07 = metadata.hypo07[-index07,]
+
+
+#Transform Area in m^2
+Area07 = metadata.hypo07$area_km2*1000*1000
+Area12 = metadata.hypo12$area_km2*1000*1000
+
+Shal.Area07 = Metashallow07$area_km2*1000*1000
+Shal.Area12 = Metashallow12$area_km2*1000*1000
+
+
+#Calculate hypolimnion temperature weighted mean
+VolT07 = VolTemp(hypo07, 2007, Area07)
+VolT12 = VolTemp(hypo12, 2012, Area12)
+
+#Create vectors for deep and shallow lakes names
+Sed.temp07 = t(Metashallow07$site_id)
+Sed.temp12 = t(Metashallow12$site_id)
+colnames(Sed.temp07) = Sed.temp07
+colnames(Sed.temp12) = Sed.temp12
+
+Sed.deep07 = t(Metadeep07$site_id)
+Sed.deep12 = t(Metadeep12$site_id)
+colnames(Sed.deep07) = Sed.deep07
+colnames(Sed.deep12) = Sed.deep12
+
+
+
+#Calculate sediment and volume to sediment ratio
+SedVar07 = SedArea(hypo07, 2007, Area07)
+SedVar12 = SedArea(hypo12, 2012, Area12)
+
+
+Sed.temp07 <- chartr(":", "_", Sed.temp07)
+Sed.temp12 <- chartr(":", "_", Sed.temp12)
+
+colnames(Sed.temp07) = Sed.temp07
+colnames(Sed.temp12) = Sed.temp12
+
+Sed.deep07 <- chartr(":", "_", Sed.deep07)
+Sed.deep12 <- chartr(":", "_", Sed.deep12)
+
+colnames(Sed.deep07) = Sed.deep07
+colnames(Sed.deep12) = Sed.deep12
+
+ShalSedVar07 = SedArea(Sed.temp07, 2007, Shal.Area07, Hypo = F)
+ShalSedVar12 = SedArea(Sed.temp12, 2012, Shal.Area12, Hypo = F)
+DeepSedVar07 = SedArea(Sed.deep07, 2007, Metadeep07$area_km2*1000000, Hypo = F)
+DeepSedVar12 = SedArea(Sed.deep12, 2012, Metadeep12$area_km2*1000000, Hypo = F)
+
+
+#Create binary variable for hypoxia and anoxia
+hypox07 = list()
+for(i in c(1:dim(hypo07)[2]))
+{
+  data = read.csv(paste0("../data/Preprocessing/2007/", 
+                         colnames(hypo07)[i], ".csv"), row.names = 1)
+  if(min(data$DO, na.rm = T) <= 2) {hypox07[[i]] = 1} else {hypox07[[i]]=0}
+}
+
+hypox12 = list()
+for(i in c(1:dim(hypo12)[2]))
+{
+  data = read.csv(paste0("../data/Preprocessing/2012/",
+                         colnames(hypo12)[i], ".csv"), row.names = 1)
+  if(min(data$DO, na.rm = T) <= 2) {hypox12[[i]] = 1} else {hypox12[[i]]=0}
+}
+
+hypox07 = as.factor(unlist(hypox07))
+hypox12 = as.factor(unlist(hypox12))
+
+#Get surface temperature and bottom temperature
+T_C07 = matrix(nrow=ncol(hypo07), ncol=3)
+rownames(T_C07) <- colnames(hypo07)
+for(i in 1:nrow(T_C07)){
+  data = read.csv(paste0("../data/Preprocessing/2007/",
+                         colnames(hypo07)[i], ".csv"), row.names = 1)
+  T_C07[i,1] <- data$temp[1]
+  T_C07[i,2] <- data$temp[length(data$temp)]
+  T_C07[i,3] <- T_C07[i,1] - T_C07[i,2]
+}
+#There is 1 missing value at the bottom, use second to last value instead
+T_C07[263,2] = 6.63
+T_C07[263,3] = 19.4-6.63
+
+T_C12 = matrix(nrow=ncol(hypo12), ncol=3)
+rownames(T_C12) <- colnames(hypo12)
+for(i in 1:nrow(T_C12)){
+  data = read.csv(paste0("../data/Preprocessing/2012/",
+                         colnames(hypo12)[i], ".csv"), row.names = 1)
+  j=1
+  k=length(data$temp)
+  if(is.na(data$temp[j])) j=2
+  if(is.na(data$temp[k])) k = k-1
+  T_C12[i,1] <- data$temp[j]
+  T_C12[i,2] <- data$temp[k]
+  T_C12[i,3] <- T_C12[i,1] - T_C12[i,2]
+}
+#Still 1 missing values after taking 2nd or second-to-last temperature value, fill manually
+T_C12[11,2] = 6.1
+T_C12[11,3] = 24.45-6.1
+
+
+#Again for shallow lakes
+Shal.hypox07 = list()
+ shallowlat07 <- chartr(":", "_",  shallowlat07)
+ shallowlat12 <- chartr(":", "_",  shallowlat12)
+
+for(i in c(1:length(shallowlat07)))
+{
+  data = read.csv(paste0("../data/Preprocessing/2007/", 
+                         shallowlat07[i]), row.names = 1)
+  if(min(data$DO, na.rm = T) <= 2) {Shal.hypox07[[i]] = 1} else {Shal.hypox07[[i]]=0}
+}
+
+Shal.hypox12 = list()
+for(i in c(1:length(shallowlat12)))
+{
+  data = read.csv(paste0("../data/Preprocessing/2012/", 
+                          shallowlat12[i]), row.names = 1)
+  if(min(data$DO, na.rm = T) <= 2) {Shal.hypox12[[i]] = 1} else {Shal.hypox12[[i]]=0}
+}
+
+Shal.hypox07 = as.factor(unlist(Shal.hypox07))
+Shal.hypox12 = as.factor(unlist(Shal.hypox12))
+
+#Get temperature
+shal_T_C07 = matrix(nrow=length(shallowlat07), ncol=3)
+rownames(shal_T_C07) <- unlist(strsplit(x = shallowlat07, split = ".csv"))
+for(i in 1:nrow(shal_T_C07)){
+  data = read.csv(paste0("../data/Preprocessing/2007/",
+                         shallowlat07[i]), row.names = 1)
+  shal_T_C07[i,1] <- data$temp[1]
+  shal_T_C07[i,2] <- data$temp[length(data$temp)]
+  shal_T_C07[i,3] <- shal_T_C07[i,1] - shal_T_C07[i,2]
+}
+
+
+shal_T_C12 = matrix(nrow=length(shallowlat12), ncol=3)
+rownames(shal_T_C12) <- unlist(strsplit(x = shallowlat12, split = ".csv"))
+for(i in 1:nrow(shal_T_C12)){
+  data = read.csv(paste0("../data/Preprocessing/2012/",
+                         shallowlat12[i]), row.names = 1)
+    j=1
+  k=length(data$temp)
+  if(is.na(data$temp[j])) j=2
+  if(is.na(data$temp[k])) k = k-1
+  shal_T_C12[i,1] <- data$temp[j]
+  shal_T_C12[i,2] <- data$temp[k]
+  shal_T_C12[i,3] <- shal_T_C12[i,1] - shal_T_C12[i,2]
+}
+#Fill some missing values
+shal_T_C12[42,1] <- 14.795
+shal_T_C12[42,3] <- 14.795-13
+  
+shal_T_C12[44,1] <- 19.08
+shal_T_C12[44,3] <- 19.08-18.93
+
+shal_T_C12[45,1] <- 27.2
+shal_T_C12[45,3] <- 27.2-27.1
+  
+shal_T_C12[53,1] <- 17.2
+shal_T_C12[53,3] <- 0
+  
+shal_T_C12[54,1] <- 22.3
+shal_T_C12[54,3] <- 0.1
+  
+shal_T_C12[85,1] <- 21.9
+shal_T_C12[85,3] <- 0
+  
+shal_T_C12[91,1] <- 24.9
+shal_T_C12[91,3] <- 0.5
+
+shal_T_C12[178,1] <- 22.9
+shal_T_C12[178,3] <- 0
+  
+shal_T_C12[179,1] <- 16.9
+shal_T_C12[179,3] <- 0.1
+  
+shal_T_C12[180,1] <- 18.05
+shal_T_C12[180,3] <- 0
+  
+shal_T_C12[186,1] <- 23.8
+shal_T_C12[186,3] <- -0.1
+  
+shal_T_C12[187,1] <- 24.6
+shal_T_C12[187,3] <- 0
+
+shal_T_C12[189,1] <- 22.5
+shal_T_C12[189,3] <- 22.5-18.6
+  
+
+deepT_C07 = matrix(nrow=length(Sed.deep07), ncol=3)
+rownames(deepT_C07) <- Sed.deep07
+for(i in 1:nrow(deepT_C07)){
+  data = read.csv(paste0("../data/Preprocessing/2007/",
+                         Sed.deep07[i], ".csv"), row.names = 1)
+  j=1
+  k=length(data$temp)
+  if(is.na(data$temp[j])) j=2
+  if(is.na(data$temp[k])) k = k-1
+  deepT_C07[i,1] <- data$temp[j]
+  deepT_C07[i,2] <- data$temp[k]
+  deepT_C07[i,3] <- deepT_C07[i,1] - deepT_C07[i,2]
+}
+deepT_C07[115,2] = 24.5
+deepT_C07[115,3] = 24.5-22.1
+
+
+deepT_C12 = matrix(nrow=length(Sed.deep12), ncol=3)
+rownames(deepT_C12) <- Sed.deep12
+for(i in 1:nrow(deepT_C12)){
+  data = read.csv(paste0("../data/Preprocessing/2012/",
+                         Sed.deep12[i], ".csv"), row.names = 1)
+  j=1
+  k=length(data$temp)
+  if(is.na(data$temp[j])) j=2
+  if(is.na(data$temp[k])) k = k-1
+  deepT_C12[i,1] <- data$temp[j]
+  deepT_C12[i,2] <- data$temp[k]
+  deepT_C12[i,3] <- deepT_C12[i,1] - deepT_C12[i,2]
+}
+deepT_C12[17,2] = 6.1
+deepT_C12[17,3] = 24.45-6.1
+
+#Combined dataframes
+metadata.hypo07 = cbind(metadata.hypo07, VolT=VolT07, SedVar07, hypox=hypox07, surfT_C = T_C07[,1], deepT_C = T_C07[,2], deltaT_C = T_C07[,3])#, RelO2=RelO207
+metadata.hypo12 = cbind(metadata.hypo12, VolT=VolT12, SedVar12, hypox=hypox12, surfT_C = T_C12[,1], deepT_C = T_C12[,2], deltaT_C = T_C12[,3])#, RelO2=RelO212
+
+Metashallow07 = cbind(Metashallow07, ShalSedVar07, hypox=Shal.hypox07, surfT_C = shal_T_C07[,1], deepT_C = shal_T_C07[,2], deltaT_C = shal_T_C07[,3])#, RelO2=RelO207
+Metashallow12 = cbind(Metashallow12, ShalSedVar12, hypox=Shal.hypox12, surfT_C = shal_T_C12[,1], deepT_C = shal_T_C12[,2], deltaT_C = shal_T_C12[,3])#, RelO2=RelO212
+
+Metadeep07 = cbind(Metadeep07, DeepSedVar07, surfT_C = deepT_C07[,1], deepT_C = deepT_C07[,2], deltaT_C = deepT_C07[,3])
+Metadeep12 = cbind(Metadeep12, DeepSedVar12, surfT_C = deepT_C12[,1], deepT_C = deepT_C12[,2], deltaT_C = deepT_C12[,3])
+
+#Map for deep lakes
+ggplot(metadata0712,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_fixed(1.3)+
+    geom_point(data=Metadeep07,aes(x=lon,y=lat),size=1.4,col="black")+
+  geom_point(data=Metadeep12,aes(x=lon,y=lat),size=1.4,col="black")+
+theme(panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "Gray75"),
+      axis.title = element_blank())
+
+#Map for shallow lakes
+ggplot(metadata0712,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_fixed(1.3)+
+    geom_point(data=Metashallow07,aes(x=lon,y=lat),size=1.4,col="black")+
+    geom_point(data=Metashallow12,aes(x=lon,y=lat),size=1.4,col="black")+
+theme(panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "Gray75"),
+      axis.title = element_blank())
+
+
+#Hypoxia in deep, non-hypolimnetic lakes
+NoHypo07Names <- colnames(NoHypo07)
+NoHypo12Names <- colnames(NoHypo12)
+
+NoHypo.hypox07 = list()
+NoHypo.hypox12 = list()
+
+for(i in c(1:length(NoHypo07Names)))
+{
+  data = read.csv(paste0("../data/Preprocessing/2007/", 
+                         NoHypo07Names[i],".csv"), row.names = 1)
+  if(min(data$DO, na.rm = T) <= 2) {NoHypo.hypox07[[i]] = 1} else {NoHypo.hypox07[[i]]=0}
+}
+
+
+for(i in c(1:length(NoHypo12Names)))
+{
+  data = read.csv(paste0("../data/Preprocessing/2012/", 
+                          NoHypo12Names[i],".csv"), row.names = 1)
+  if(min(data$DO, na.rm = T) <= 2) {NoHypo.hypox12[[i]] = 1} else {NoHypo.hypox12[[i]]=0}
+}
+
+NoHypo.hypox07 = as.factor(unlist(NoHypo.hypox07))
+NoHypo.hypox12 = as.factor(unlist(NoHypo.hypox12))
+
+#Include temperature
+Nohypo_T_C07 <- matrix(nrow=length(NoHypo07Names), ncol=3)
+rownames(Nohypo_T_C07) <- NoHypo07Names
+for(i in 1:nrow(Nohypo_T_C07)){
+ data = read.csv(paste0("../data/Preprocessing/2007/",
+                        NoHypo07Names[i],".csv"), row.names = 1)
+ j=1
+ k=length(data$temp)
+ if(is.na(data$temp[j])) j=2
+ if(is.na(data$temp[k])) k = k-1
+ Nohypo_T_C07[i,1] <- data$temp[j]
+ Nohypo_T_C07[i,2] <- data$temp[k]
+ Nohypo_T_C07[i,3] <- Nohypo_T_C07[i,1] - Nohypo_T_C07[i,2]
+}
+#Fill 1 missing value
+Nohypo_T_C07[53,2] <- 22.1
+Nohypo_T_C07[53,3] <- 24.5-22.1
+
+Nohypo_T_C12 <- matrix(nrow=length(NoHypo12Names), ncol=3)
+rownames(Nohypo_T_C12) <- NoHypo12Names
+for(i in 1:nrow(Nohypo_T_C12)){
+ data = read.csv(paste0("../data/Preprocessing/2012/",
+                        NoHypo12Names[i],".csv"), row.names = 1)
+ j=1
+ k=length(data$temp)
+ if(is.na(data$temp[j])) j=2
+ if(is.na(data$temp[k])) k = k-1
+ Nohypo_T_C12[i,1] <- data$temp[j]
+ Nohypo_T_C12[i,2] <- data$temp[k]
+ Nohypo_T_C12[i,3] <- Nohypo_T_C12[i,1] - Nohypo_T_C12[i,2]
+}
+
+
+
+NoHypo.Area07 = metadata.NoHypo07$area_km2*1000*1000
+NoHypo.Area12 = metadata.NoHypo12$area_km2*1000*1000
+Sed.NoHypo07 = t(Metadeep07$site_id)
+Sed.NoHypo12 = t(Metadeep12$site_id)
+colnames(Sed.NoHypo07) = Sed.NoHypo07
+colnames(Sed.NoHypo12) = Sed.NoHypo12
+SedVarNoHypo07 = SedArea(NoHypo07, 2007, NoHypo.Area07)
+SedVarNoHypo12 = SedArea(NoHypo12, 2012, NoHypo.Area12)
+
+
+#Combine
+metadata.NoHypo07 = cbind(metadata.NoHypo07,  hypox=NoHypo.hypox07, surfT_C = Nohypo_T_C07[,1], deepT_C = Nohypo_T_C07[,2], deltaT_C = Nohypo_T_C07[,3])#, RelO2=RelO207 SedVarNoHypo07,
+metadata.NoHypo12 = cbind(metadata.NoHypo12, hypox=NoHypo.hypox12, surfT_C = Nohypo_T_C12[,1], deepT_C = Nohypo_T_C12[,2], deltaT_C = Nohypo_T_C12[,3])#, RelO2=RelO212 SedVarNoHypo12, 
+
+
+#Map for non-hypolimnetic lakes
+ggplot(metadata0712,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_fixed(1.3)+
+    geom_point(data=metadata.NoHypo07,aes(x=lon,y=lat),size=1.4,col="black")+
+    geom_point(data=metadata.NoHypo12,aes(x=lon,y=lat),size=1.4,col="black")+
+theme(panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "Gray75"),
+      axis.title = element_blank())
+
+
+```
+
+
+```{r}
+
+#Idem but for dataset of only lakes with hypolimnion
+#####We assume that if maxdepth = sampled_max_depth, we add 0.5m from the bottom to MaxDepth#####
+# for(i in 1:length(metadata.hypo07$depthmax_m)){
+#   if(metadata.hypo07$depthmax_m[i] == metadata.hypo07$sampled_depthmax_m[i]) metadata.hypo07$depthmax_m = metadata.hypo07$depthmax_m + 0.5
+# }
+# 
+# temp.depth = metadata.hypo12$MaxDepth
+# for(i in 1:length(temp.depth)){
+# if(temp.depth[i] < metadata.hypo12$sampled_depthmax_m[i]) temp.depth[i] = metadata.hypo12$sampled_depthmax_m[i]
+# }
+# metadata.hypo12$depthmax_m = temp.depth
+# metadata.hypo12$depthmax_m[which(is.na(metadata.hypo12$depthmax_m))]= metadata.hypo12$sampled_depthmax_m[which(is.na(metadata.hypo12$depthmax_m))]
+# 
+# for(i in 1:length(metadata.hypo12$depthmax_m)){
+#   if(metadata.hypo12$depthmax_m[i] == metadata.hypo12$sampled_depthmax_m[i]) metadata.hypo12$depthmax_m = metadata.hypo12$depthmax_m + 0.5
+# }
+# 
+# #####For shallow lakes#####
+# for(i in 1:length(Metashallow07$depthmax_m)){
+#   if(Metashallow07$depthmax_m[i] == Metashallow07$sampled_depthmax_m[i]) Metashallow07$depthmax_m = Metashallow07$depthmax_m + 0.5
+# }
+# 
+# Metashallow12$depthmax_m = Metashallow12$MaxDepth
+# Metashallow12$depthmax_m[which(is.na(Metashallow12$depthmax_m))]= Metashallow12$sampled_depthmax_m[which(is.na(Metashallow12$depthmax_m))]
+# for(i in 1:length(Metashallow12$depthmax_m)){
+#   if(Metashallow12$depthmax_m[i] == Metashallow12$sampled_depthmax_m[i]) Metashallow12$depthmax_m = Metashallow12$depthmax_m + 0.5
+# }
+
+
+#Fill secchi depth when missing but clear_to_bottom = 1
+
+Metadeep07$clear_to_bottom[which(is.na(Metadeep07$clear_to_bottom))] = 0
+for(i in 1:length(Metadeep07$secchi_m)){
+  if(is.na(Metadeep07$secchi_m[i]) & Metadeep07$clear_to_bottom[i]==1) Metadeep07$secchi_m[i] = Metadeep07$depthmax_m[i]
+}
+
+Metadeep12$clear_to_bottom[which(is.na(Metadeep12$clear_to_bottom))] = 0
+for(i in 1:length(Metadeep12$secchi_m)){
+  if(is.na(Metadeep12$secchi_m[i]) & Metadeep12$clear_to_bottom[i]==1) Metadeep12$secchi_m[i] = Metadeep12$depthmax_m[i]
+}
+
+
+metadata.hypo07$clear_to_bottom[which(is.na(metadata.hypo07$clear_to_bottom))] = 0
+for(i in 1:length(metadata.hypo07$secchi_m)){
+  if(is.na(metadata.hypo07$secchi_m[i]) & metadata.hypo07$clear_to_bottom[i]==1) metadata.hypo07$secchi_m[i] = metadata.hypo07$depthmax_m[i]
+}
+
+metadata.hypo12$clear_to_bottom[which(is.na(metadata.hypo12$clear_to_bottom))] = 0
+for(i in 1:length(metadata.hypo12$secchi_m)){
+  if(is.na(metadata.hypo12$secchi_m[i]) & metadata.hypo12$clear_to_bottom[i]==1) metadata.hypo12$secchi_m[i] = metadata.hypo12$depthmax_m[i]
+}
+
+Metashallow07$clear_to_bottom[which(is.na(Metashallow07$clear_to_bottom))] = 0
+for(i in 1:length(Metashallow07$secchi_m)){
+  if(is.na(Metashallow07$secchi_m[i]) & Metashallow07$clear_to_bottom[i]==1) Metashallow07$secchi_m[i] = Metashallow07$depthmax_m[i]
+}
+
+Metashallow12$clear_to_bottom[which(is.na(Metashallow12$clear_to_bottom))] = 0
+for(i in 1:length(Metashallow12$secchi_m)){
+  if(is.na(Metashallow12$secchi_m[i]) & Metashallow12$clear_to_bottom[i]==1) Metashallow12$secchi_m[i] = Metashallow12$depthmax_m[i]
+}
+
+
+metadata.NoHypo07$clear_to_bottom[which(is.na(metadata.NoHypo07$clear_to_bottom))] = 0
+for(i in 1:length(metadata.NoHypo07$secchi_m)){
+  if(is.na(metadata.NoHypo07$secchi_m[i]) & metadata.NoHypo07$clear_to_bottom[i]==1) metadata.NoHypo07$secchi_m[i] = metadata.NoHypo07$depthmax_m[i]
+}
+
+metadata.NoHypo12$clear_to_bottom[which(is.na(metadata.NoHypo12$clear_to_bottom))] = 0
+for(i in 1:length(metadata.NoHypo12$secchi_m)){
+  if(is.na(metadata.NoHypo12$secchi_m[i]) & metadata.NoHypo12$clear_to_bottom[i]==1) metadata.NoHypo12$secchi_m[i] = metadata.NoHypo12$depthmax_m[i]
+}
+
+#Calculate lake volumes and hypolimnion dynamic ratio (DR)
+#DR = sqrt(surf[km²]) * surf[m²] / V[m³]
+ConeVol07 = vector(length = length(Area07))
+for(i in 1:length(Area07)){
+  temp = approx.bathy(Zmax = metadata.hypo07$depthmax_m[i], lkeArea = Area07[i], zinterval = 0.1)
+  ConeVol07[i] = Trunc.cone(temp)
+}
+
+voldev07 = vector(length = length(Area07))
+for(i in 1:length(Area07)){
+  temp = approx.bathy(Zmax = metadata.hypo07$depthmax_m[i], lkeArea = Area07[i], Zmean = metadata.hypo07$lMeanDepth[i], zinterval = 0.1, method = "voldev")
+  voldev07[i] = Trunc.cone(temp) }
+
+#Hypolimnion volumes
+Conehypo07 = matrix(nrow = length(Area07),ncol=2)
+colnames(Conehypo07) = c("Conehypo07", "DRhypo07")
+for(i in 1:length(Area07)){
+  temp = approx.bathy(Zmax = metadata.hypo07$depthmax_m[i], lkeArea = Area07[i], zinterval = 0.1)
+   temp = temp[which(temp$depths >= hypo07[3,i]),]
+   Conehypo07[i,1] = Trunc.cone(temp) 
+   Conehypo07[i,2] = (sqrt(temp[1,2]/1000/1000) * temp[1,2]/Conehypo07[i,1]) }
+
+Voldevhypo07 = as.data.frame(matrix(nrow = length(Area07), ncol=3))
+colnames(Voldevhypo07) = c("Site_ID","Voldevhypo07", "DRhypo07")
+for(i in 1:length(Area07)){
+  temp = approx.bathy(Zmax = metadata.hypo07$depthmax_m[i], lkeArea = Area07[i], Zmean = metadata.hypo07$lMeanDepth[i], zinterval = 0.1, method = "voldev")
+   temp = temp[which(temp$depths >= hypo07[3,i]),]
+   Voldevhypo07[i,2] = Trunc.cone(temp)
+   Voldevhypo07[i,3] = (sqrt(temp[1,2]/1000/1000) * temp[1,2]/Voldevhypo07[i,2]) 
+   Voldevhypo07[i,1] = metadata.hypo07$siteid_07[i] }
+
+par(mfrow = c(1,3))
+plot(voldev07~ConeVol07,
+     xlab = expression(Conical~volume~m^3),
+     ylab = expression(Hypsometric~volume~m^3),
+     log = "xy",
+     las = 1,
+     main = "Whole lake volume")
+text(x = 1495000, y = 10000000000, labels = expression(Mean~ratio == 1.32))
+abline(0,1, lty = 2)
+plot(Voldevhypo07[,1]~Conehypo07[,1],
+     xlab = expression(Conical~volume~m^3),
+     ylab = expression(Hypsometric~volume~m^3),
+     log = "xy",
+     las = 1,
+     main = "Hypolimnion volume")
+text(x = 5000, y = 5000000000, labels = expression(Mean~ratio == 1.48))
+abline(0,1, lty = 2)
+plot(Voldevhypo07[,2]~Conehypo07[,2],
+     xlab = expression(Conical~DR[hypo]),
+     ylab = expression(Hypsometric~DR[hypo]),
+     log = "xy",
+     las = 1,
+     main = "Hypolimnion Dynamic Ratio")
+text(x = 0.05, y = 7, labels = expression(R^2 == 0.95))
+abline(0,1, lty = 2)
+
+Voldevhypo12 = as.data.frame(matrix(nrow = length(Area12), ncol=3))
+colnames(Voldevhypo12) = c("Site_ID","Voldevhypo12", "DRhypo12")
+for(i in 1:length(Area12)){
+  temp = approx.bathy(Zmax = metadata.hypo12$depthmax_m[i], lkeArea = Area12[i], Zmean = metadata.hypo12$lMeanDepth[i], zinterval = 0.1, method = "voldev")
+   temp = temp[which(temp$depths >= hypo12[3,i]),]
+   Voldevhypo12[i,2] = Trunc.cone(temp)
+   Voldevhypo12[i,3] = (sqrt(temp[1,2]/1000/1000) * temp[1,2]/Voldevhypo12[i,2]) 
+   Voldevhypo12[i,1] =  metadata.hypo12$site_id[i]}
+
+
+
+#Calculate anoxia/hypoxia relative volume in hypolimnion
+
+RHypox07 = vector(length = length(Area07))
+for(i in 1:length(Area07)){
+  data = read.csv(paste0("../data/Preprocessing/2007/",
+                         colnames(hypo07)[i], ".csv"), row.names = 1)
+  Zinterval = 10^-decimalplaces(max(data$depth))
+    if(Zinterval==1) Zinterval=0.1
+    NewDepth = seq(min(data$depth), max(data$depth), Zinterval)
+    
+    data.linear = approx(x=data$depth, y=data$DO, xout=NewDepth)
+    data.linear = as.data.frame(matrix(c(data.linear$x,data.linear$y),ncol = 2))
+    colnames(data.linear) = c("depth", "DO")
+  
+  
+  hypox.temp = (data.linear$DO < 2)
+  if(!any(hypox.temp)) { RHypox07[i]=0 } else{
+    temp = approx.bathy(Zmax = metadata.hypo07$depthmax_m[i],
+                        lkeArea = Area07[i], Zmean = metadata.hypo07$lMeanDepth[i],
+                        zinterval = 0.1, method = "voldev")
+    #temp = temp[which(temp$depths >= hypo07[3,i]),]
+    Vol.tot = Trunc.cone(temp)
+    temp = temp[which(temp$depths >= min(data.linear[hypox.temp,"depth"], na.rm = T)),]
+    if(nrow(temp)==1) {
+      RHypox07[i]=0
+      next}
+   
+    output.temp = Trunc.cone(temp)
+    RHypox07[i] = output.temp/Vol.tot
+  }
+}
+
+
+# RHypox07hypo = vector(length = length(Area07))
+# for(i in 1:length(Area07)){
+#   data = read.csv(paste0("../data/Preprocessing/2007/",
+#                          colnames(hypo07)[i], ".csv"), row.names = 1)
+#   hypox.temp = (data$DO < 2)
+#   if(!any(hypox.temp)) { RHypox07[i]=0 } else{
+#     temp = approx.bathy(Zmax = metadata.hypo07$depthmax_m[i],
+#                         lkeArea = Area07[i], Zmean = morphohypo07$lMeanDepth[i],
+#                         zinterval = 0.1, method = "voldev")
+#     temp = temp[which(temp$depths >= hypo07[3,i]),]
+#     Vol.tot = Trunc.cone(temp)
+#     temp = temp[which(temp$depths >= min(data[hypox.temp,"depth"], na.rm = T)),]
+#     if(nrow(temp)==1) {
+#       RHypox07lhypo[i]=0
+#       next}
+#    
+#     output.temp = Trunc.cone(temp)
+#     RHypox07hypo[i] = (output.temp)/(Vol.tot)
+#   }
+# }
+
+RHypox12 = vector(length = length(Area12))
+for(i in 1:length(Area12)){
+  data = read.csv(paste0("../data/Preprocessing/2012/",
+                         colnames(hypo12)[i], ".csv"), row.names = 1)
+  hypox.temp = na.omit((data$DO < 2))
+  if(length(which(hypox.temp==TRUE)) == length(data$DO))
+  { RHypox12[i] = 999
+    next }
+  if(!any(hypox.temp)) { RHypox12[i]=0 } else{
+  Zinterval = 10^-decimalplaces(max(data$depth))
+    if(Zinterval==1) Zinterval=0.1
+    NewDepth = seq(min(data$depth), max(data$depth), Zinterval)
+    
+    data.linear = approx(x=data$depth, y=data$DO, xout=NewDepth)
+    data.linear = as.data.frame(matrix(c(data.linear$x,data.linear$y),ncol = 2))
+    colnames(data.linear) = c("depth", "DO")
+  
+  
+  hypox.temp = na.omit(data.linear$DO < 2)
+  
+  
+    temp = approx.bathy(Zmax = metadata.hypo12$depthmax_m[i],
+                        lkeArea = Area12[i], Zmean = metadata.hypo12$lMeanDepth[i],
+                        zinterval = 0.05, method = "voldev")
+    #temp = temp[which(temp$depths >= hypo12[3,i]),]
+    Vol.tot = Trunc.cone(temp)
+    temp = temp[which(temp$depths >= min(data.linear[hypox.temp,"depth"], na.rm = T)),]
+    
+    if(nrow(temp)==1) {
+      RHypox12[i]=0
+      next}
+    
+    output.temp = Trunc.cone(temp)
+    RHypox12[i] = output.temp/Vol.tot
+  }
+}
+
+# 
+# RHypox12hypo = vector(length = length(Area12))
+# for(i in 1:length(Area12)){
+#   data = read.csv(paste0("../data/Preprocessing/2012/",
+#                          colnames(hypo12)[i], ".csv"), row.names = 1)
+#   hypox.temp = na.omit((data$DO < 2))
+#   if(!any(hypox.temp)) { RHypox12[i]=0 } else{
+#     temp = approx.bathy(Zmax = metadata.hypo12$depthmax_m[i],
+#                         lkeArea = Area12[i], Zmean = morphohypo12$lMeanDepth[i],
+#                         zinterval = 10^-decimalplaces(max(data$depth)), method = "voldev")
+#     temp = temp[which(temp$depths >= hypo12[3,i]),]
+#     Vol.tot = Trunc.cone(temp)
+#     temp = temp[which(temp$depths >= min(data[hypox.temp,"depth"], na.rm = T)),]
+#     
+#     if(nrow(temp)==1) {
+#       RHypox12hypo[i]=0
+#       next}
+#     
+#     output.temp = Trunc.cone(temp)
+#     RHypox12hypo[i] = (output.temp)/(Vol.tot)
+#   }
+# }
+
+names(RHypox07) <- metadata.hypo07$site_id
+names(RHypox12) <- metadata.hypo12$site_id
+
+
+#Charger les Lakes Max length 2007
+MaxL.short07.df = read.csv("../data/LakeLengths_NLA2007.csv")
+MaxL.long07.df = read.csv("../data/LakeLengths_NLA2007_3000more.csv")
+Match.07 = match(MaxL.short07.df$lakeID, MaxL.long07.df$LakeID)[1:102] #102 first have a match
+MaxL.07df = MaxL.short07.df[,c(2,5)]
+MaxL.07df[c(1:102),2] = MaxL.long07.df[Match.07,"FineMaxLength"]
+colnames(MaxL.07df)[1] = "site_id"
+
+
+#Charger les Lakes Max length 2012
+MaxL.short12.df = read.csv("../data/LakeLengths_NLA2012.csv")
+MaxL.long12.df = read.csv("../data/LakeLengths_NLA2012_3000more.csv")
+Match.12 = match(MaxL.short12.df$lakeID, MaxL.long12.df$LakeID)[1:82] #82 first have a match
+MaxL.12df = MaxL.short12.df[,c(2,5)]
+MaxL.12df[c(1:82),2] = MaxL.long12.df[Match.12,"FineMaxLength"]
+colnames(MaxL.12df)[1] = "site_id"
+MaxL.0712 = rbind(MaxL.07df,MaxL.12df)
+MaxL.0712$site_id = gsub(":", "_", MaxL.0712$site_id)
+
+#Foret aleatoire pour predire p/a hypolimnion
+Binforest07 = merge(x = Metadeep07, y = MaxL.0712, by = "site_id",all.x =T)
+#Fill missing lake length manually with google maps
+#Get coordinates
+Binforest07[is.na(Binforest07$MaxLength),c(1,8,9)]
+
+#                site_id      lat        lon
+# 20       NLA06608-0053 43.55819  -73.43961 #Will be removed in a few lines
+# 594 NLA06608-R10BULLTR 44.29998 -115.25396 #844
+# 622  NLA06608-WI_LOWES 43.21838  -88.31153 #406
+# 623     NLA06608-WI_SY 43.95898  -87.94398 #405
+
+#Kept here for reference
+# NLA06608-0053 43.55819  -73.43961
+# NLA06608-ALSC:020149 44.34881  -74.40149
+# NLA06608-ELS:1C2-032 43.29636  -71.42810
+# NLA06608-ELS:1C3-003 45.65355  -69.92726
+# NLA06608-ELS:1D1-035 41.84817  -70.61768
+# NLA06608-ELS:1E1-052 45.20707  -68.20917 #2240
+# NLA06608-ELS:1E1-096 45.21900  -68.07777
+# NLA06608-ELS:1E1-128 44.84988  -68.42925
+# NLA06608-ELS:1E3-012 46.94464  -68.87113 #436
+# NLA06608-ELS:2C2-048 45.50053  -88.79465
+# NLA06608-ELS:2C3-018 46.13860  -89.55289
+# NLA06608-ELS:2D3-008 47.12281  -93.88050 #1020
+# NLA06608-EMAP:ME011L 45.74821  -69.22252 #1035
+# NLA06608-EMAP:ME254L 46.35331  -69.05697 #1070
+# NLA06608-EMAP:ME518L 45.35447  -67.92250 #4760
+# NLA06608-IN:646 41.56235  -85.39243 #1020
+# NLA06608-MI:7007 42.39865  -84.05681
+#  NLA06608-MN:03-0029 47.06284  -95.18120
+#  NLA06608-MN:06-0002 45.33182  -96.13567
+# NLA06608-MN:11-0102 46.92838  -94.04081 #2560
+# NLA06608-MN:15-0010 47.18947  -95.21841 #1770
+# NLA06608-MN:22-0074 43.81920  -94.07878
+# NLA06608-MN:49-0140 45.81311  -94.63697 #1550
+# NLA06608-MN:56-0306 46.29254  -95.74850 #1480
+# NLA06608-MN:61-0037 45.49016  -95.36491 #1020
+# NLA06608-MN:74-0023 43.89157  -93.34976
+# NLA06608-NV:2 40.59294 -115.39428
+# NLA06608-NV:3 41.02647 -115.08702
+# NLA06608-OH:22 40.08076  -83.03282
+# NLA06608-MN:77-0019 45.76883  -94.67026 #2120
+# NLA06608-R5:KATHRYN 46.38197  -88.72471
+# NLA06608-R10BULLTR 44.29998 -115.25396 #844
+# NLA06608-R5:OTTAWA 46.08392  -88.76232 #2620
+# NLA06608-WI:LOWES 43.21838  -88.31153
+# NLA06608-WI:SY 43.95898  -87.94398 #405
+
+
+Binforest07[which(is.na(Binforest07$MaxLength)),"MaxLength"] = c(NA,844,406,405)
+Binforest07 = Binforest07[-which(is.na(Binforest07$MaxLength)),]
+
+Temp.id07 = Binforest07$site_id
+Binforest07 = missForest(Binforest07[,-c(1,2,3,4,10:15,35,36,37,40,65,66)])
+Binforest07 = Binforest07$ximp
+Binforest07[which(Binforest07$secchi_m > Binforest07$depthmax_m),"secchi_m"] = Binforest07[which(Binforest07$secchi_m > Binforest07$depthmax_m),"depthmax_m"]
+# Binforest07$Transparency = Binforest07$secchi_m / Binforest07$depthmax_m
+
+Binforest07$site_id = Temp.id07
+Binforest07 = merge(x=Binforest07, y=Metadeep07[,c(34,38,66)], by = "site_id")
+
+#Repeat with 2012
+Binforest12 = merge(x = Metadeep12, y = MaxL.0712, by = "site_id",all.x =T)
+#Remove the 2 Max Length NA that are rivers
+# Binforest12 = Binforest12[-which(is.na(Binforest12$MaxLength)),]
+
+
+Temp.id12 = Binforest12$site_id
+Binforest12 = missForest(Binforest12[,-c(1,2,3,4,10:15,35,36,37,40,65,66)])
+Binforest12 = Binforest12$ximp
+Binforest12[which(Binforest12$secchi_m > Binforest12$depthmax_m),"secchi_m"] = Binforest12[which(Binforest12$secchi_m > Binforest12$depthmax_m),"depthmax_m"]
+# Binforest12$Transparency = Binforest12$secchi_m / Binforest12$depthmax_m
+
+Binforest12$site_id = Temp.id12
+Binforest12 = merge(Binforest12, Metadeep12[,c(34,38,66)], by = "site_id")
+
+# 
+# #Calculer la difference de temperature entre la surface et le fond
+# deltaT07 = deltaT(Binforest07, 2007)
+# deltaT12 = deltaT(Binforest12, 2012)
+# deltaT0712 = c(deltaT07, deltaT12)
+
+Bin0712 = rbind(Binforest07, Binforest12)
+Bin0712$NTL_umolL = Bin0712$NTL_ugL/14.0067 #Transform into umol
+Bin0712$PTL_umolL = Bin0712$PTL_ugL/30.973762 #Transform into umol
+Bin0712$DOC_umolL = Bin0712$DOC_mgL/12.0107*1000
+
+#Remove some lake without a hypolimnion
+Bin0712 <- Bin0712[!(Bin0712$site_id %in% c("NLA06608-1150", "NLA06608-1151", "NLA06608-1434", "NLA06608-2797", "NLA06608-3698", "NLA06608-NELP-3355", "NLA06608-R34","NLA12_UT-126")),]
+#Remove some saline lakes
+# Bin0712 <- Bin0712[!(Bin0712$site_id %in% c("NLA06608-2889", "NLA06608-0064", "NLA06608-0073", "NLA06608-0727")),]
+Bin0712 <- Bin0712[Bin0712$cond_uScm<1000,]
+
+#Remove lakes in 2012 that were half or no profiles
+Bin0712 <- Bin0712[!(Bin0712$site_id %in% c("NLA06608-1292", "NLA06608-3160", "NLA12_WY-116")& Bin0712$year==2012),]
+
+
+Binhypopred = c("lat", "lon","area_km2", "elevation_m", "basinarea_km2", "chla_ugL", "NTL_umolL", "PTL_umolL", "DOC_umolL", "secchi_m", "color_PCU","WALA_ratio", "pct_forest", "pct_agric",  "nutrient_color","lMeanDepth","lShorelineDevelopment", "depthmax_m","Julian.day", "MaxLength", "Binhypo")#lMinorAxisLength", "lFetch
+#Removed for ASLO presentation: "SedArea", "VoltoSedArea", "Transparency"
+
+BF0712 = Bin0712[,Binhypopred]
+BF0712$Binhypo = as.factor(BF0712$Binhypo)
+BF0712$DSR = sqrt(BF0712$area_km2)/BF0712$lMeanDepth
+BF0712.back = BF0712
+BF0712 = BF0712[,-18] #Remove maxdepth because VIF is highest at ~40, but reduces max VIF to ~6 after this is ermoved
+
+#TEMPORARY FIX WALA
+BF0712$WALA_ratio[1050] = BF0712$WALA_ratio[1050]/1000
+BF0712$basinarea_km2[1050] = BF0712$basinarea_km2[1050]/1000
+
+#There is a NA in Nutrient_color column that should be brown
+BF0712$nutrient_color[is.na(BF0712$nutrient_color)] = "brown"
+
+# BF0712$Transparency = BF0712$Transparency*100 #Transform in %
+
+set.seed(100)
+#Train and test datasets
+train0712 = sample(1:nrow(BF0712), 0.7*nrow(BF0712))
+test0712 = which(!1:nrow(BF0712) %in% train0712)
+
+#Create output matrix and name columns
+# out.mat = matrix(nrow = ncol(BF0712))
+# rownames(out.mat) = c("All", colnames(BF0712)[-length(colnames(BF0712))])
+
+#Random Forest on all variables
+# rf.bh0712 = randomForest(Binhypo~., data=BF0712, subset = train0712, localImp = TRUE, ntree=1000)
+# rf.bt0712 = predict(rf.bh0712, newdata = BF0712[test0712,])
+# confusionMatrix(rf.bt0712, BF0712[test0712,"Binhypo"]) #0.8555
+
+# plot(rf.bt0712 ~ BF0712[test0712,"Binhypo"],
+#      xlab = expression(Presence/absence~hypolimnion),
+#      # xlim = c(-4,4),
+#      # ylim = c(-2,3),
+#      ylab = expression(Predicted~presence/absence~hypolimnion),
+#      las = 1)
+# 
+# r.bh0712.Gini <- rf.bh0712$importance[,4]
+# r.bh0712.Gini = r.bh0712.Gini[order(r.bh0712.Gini,decreasing = F)]
+# par(mar = c(5,7,5,1)+.1)
+# barplot(r.bh0712.Gini,horiz = T, las = 1,cex.names =0.5)
+# 
+# rtparty0712 = ctree(Binhypo ~ .,
+#                     data=BF0712[train0712,],
+#                     controls=cforest_control(mtry=NULL, mincriterion=3))
+# #pdf("../output/tree0712.pdf", width = 30, height = 15)
+# plot(rtparty0712)
+
+#explain_forest(rf.bh0712, interactions = TRUE, data = BF0712[train0712,])
+
+#Test qith caret package
+control <- trainControl(method='repeatedcv',
+                        number=10,
+                        repeats=3,
+                        search='grid')
+#create tunegrid with 15 values from 1:15 for mtry to tunning model. Our train function will #change number of entry variable at each split according to tunegrid.
+tunegrid <- expand.grid(.mtry = (1:20))
+#Random generate 15 mtry values with tuneLength = 15
+set.seed(101)
+
+rf_gridsearch <- caret::train(Binhypo ~.,
+                       data = BF0712,
+                       method = "rf",
+                       metric = "Accuracy",
+                       tuneGrid = tunegrid,
+                        trControl = control)
+
+pdf("../../../NLA paper/Figures/Fig. 1.V2.pdf")
+plot(varImp(rf_gridsearch), main = "Hypolimnion (presence/absence)")
+dev.off()
+#Assign RF value based on votes
+RF.classif <- rf_gridsearch$finalModel$predicted
+Obs.classif <- BF0712$Binhypo
+pch.code <- ifelse(RF.classif==Obs.classif, 1, 0)
+
+RF.classif.test <- as.character(RF.classif)
+RF.classif.test[RF.classif.test =="0"]="2"
+RF.classif.test = as.factor(RF.classif.test)
+Obs.classif.test <- as.character(Obs.classif)
+Obs.classif.test[Obs.classif.test =="0"]="2"
+Obs.classif.test = as.factor(Obs.classif.test)
+
+confusionMatrix(RF.classif.test ,Obs.classif.test,mode = "prec_recall")
+# Accuracy : 0.854
+# Precision : 0.8482
+# Recall : 0.815
+# F1 : 0.831
+
+
+
+#Create df
+rf.hypo = data.frame(lon = BF0712$lon,
+                     lat = BF0712$lat,
+                     RF.classif = RF.classif,
+                     pch.code = pch.code)
+pdf("../../../NLA paper/Figures/Fig. 2a-V2.pdf", width = 10, height=5)
+plot(BF0712$Binhypo ~ BF0712$lMeanDepth,
+     las = 1,
+     xlab = "Mean depth (m)",
+     ylab = "Hypolimion",
+     col = c("#4477AA","#66CCEE"))
+dev.off()
+
+# pdf("../../../NLA paper/Figures/Fig. S1.V2.pdf", width = 6.66, height=4)
+pdf("../../../NLA paper/Figures/Fig. S1.V2.pdf", width = 6.66, height=4)
+par(mfrow = c(1,2))
+plot(BF0712$Binhypo ~ log(BF0712$DSR),
+     las = 3,
+     xlab = expression(paste(DSR~(km~m^-1),","~log~values)),
+     ylab = "Hypolimion",
+     col = c("#4477AA","#66CCEE"))
+mtext("a", side = 3, at = 0)
+# plot(BF0712$Binhypo ~ BF0712$Transparency,
+#      las = 3,
+#      xlab = "Lake transparency (%)",
+#      ylab = "Hypolimion",
+#      col = c("#4477AA","#66CCEE"))
+# mtext("b", side = 3, at = 0)
+plot(BF0712$Binhypo ~ log(BF0712$secchi_m),
+     las = 3,
+     xlab = "Secchi (m), log values",
+     ylab = "Hypolimion",
+     col = c("#4477AA","#66CCEE"))
+mtext("b", side = 3, at = 0)
+# plot(BF0712$Binhypo ~ BF0712$Julian.day,
+#      las = 3,
+#      xlab = expression(Day~of~year),
+#      ylab = "Hypolimnion",
+#      col = c("#4477AA","#66CCEE"))
+# mtext("a", side = 3, at = 0)
+dev.off()
+
+hypo.tree = caret::train(Binhypo ~ ., 
+                  data=BF0712, 
+                  method="rpart", 
+                  trControl = control)
+
+tree.classif <- as.data.frame(predict(hypo.tree$finalModel))
+tree.classif[,3] = 1
+tree.classif[tree.classif[,2]<0.5,3] = 0
+Obs.classif <- BF0712$Binhypo
+
+tree.classif.test <- as.character(tree.classif[,3])
+tree.classif.test[tree.classif.test =="0"]="2"
+tree.classif.test = as.factor(tree.classif.test)
+Obs.classif.test <- as.character(Obs.classif)
+Obs.classif.test[Obs.classif.test =="0"]="2"
+Obs.classif.test = as.factor(Obs.classif.test)
+
+confusionMatrix(tree.classif.test,Obs.classif.test,mode = "prec_recall")
+
+# Accuracy : 0.858
+# Precision : 0.850
+# Recall : 0.825
+# F1 : 0.837
+
+
+pdf("../../../NLA paper/Hypolimnion Tree.V2.pdf")
+fancyRpartPlot(hypo.tree$finalModel)
+dev.off()
+
+#Estimate shifting lakes by modifying water levels slightly
+
+output.temp = matrix(nrow = nrow(BF0712), ncol=25)
+output.temp[,13] = BF0712$Binhypo #0/1
+WL.testdata = BF0712
+  for(i in -12:12) {
+    #The scalars are the delta between 25 and 0 quantile, divided by 25
+    WL.testdata$lMeanDepth   = BF0712$lMeanDepth+0.05*i
+    output.temp[, i+13] = predict(rf_gridsearch, newdata = WL.testdata)
+  }
+  output.temp = output.temp-1
+  perc.hypo = colSums(output.temp)/nrow(output.temp)*100
+
+jpeg("../../../NLA paper/Figures/Fig. S2_DeltaDepths.jpg", height = 6, width = 6, units = "in", res = 300)
+plot(perc.hypo ~ seq(-12,12,1),
+     las =1,
+     main = "",
+     xlim = c(-12,12),
+     ylab = "Lakes with hypolimnion (%)",
+     xlab = "Changes in mean depth (cm)",
+     xaxt= "n",
+     pch = 21,
+     bg = "Black")
+axis(side = 1, at = c(-12,-9,-6,-3,0,3,6,9,12),labels = c("-60", "-45", "-30", "-15", "0", "15", "30","45","60"))
+dev.off()
+abline(v=0, lty=3)
+
+summary(BF0712[which(output.temp[,1]==0 & output.temp[,13] == 1),"lMeanDepth"])
+summary(BF0712[which(output.temp[,13]==0 & output.temp[,25] == 1),"lMeanDepth"])
+
+par(mfrow=c(1,3))
+#Comparing hypolimnion 0/1 as a function of mean depth, with varying water level (-60cm, 0cm, +60cm)
+plot(as.factor(output.temp[,1]) ~ BF0712$lMeanDepth,
+     las = 1,
+     xlab = "Mean depth (m)",
+     ylab = "Hypolimion",
+     col = c("#66CCEE", "#4477AA"))
+plot(as.factor(output.temp[,13]) ~ BF0712$lMeanDepth,
+     las = 1,
+     xlab = "Mean depth (m)",
+     ylab = "Hypolimion",
+     col = c("#66CCEE", "#4477AA"))
+plot(as.factor(output.temp[,25]) ~ BF0712$lMeanDepth,
+     las = 1,
+     xlab = "Mean depth (m)",
+     ylab = "Hypolimion",
+     col = c("#66CCEE", "#4477AA"))
+
+#####
+#Create map with hypolimnion data
+# ggplot(rf.hypo,aes(x=lon,y=lat))+
+#     geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+#     coord_fixed(1.3)+
+#     geom_point(data=rf.hypo,aes(x=lon,y=lat, shape=as.factor(pch.code), color=as.factor(RF.classif), fill = as.factor(RF.classif), alpha = 0.1),size=1.4)+
+#     scale_shape_manual(values = c(25,21))+
+#     scale_color_manual(values=c("black",'black'))+
+#     scale_fill_manual(values=c("#00FFFF","#4477AA"))+
+#   theme(panel.grid.major = element_blank(),
+#       panel.grid.minor = element_blank(),
+#       panel.background = element_blank(),
+#       axis.line = element_line(colour = "Gray75"),
+#       axis.title = element_blank())
+
+
+
+# 
+# #Estimate shifting lakes with increased nutrients and productivity
+# output = matrix(nrow = nrow(BF0712), ncol=51)
+# output[,1] = BF0712$Binhypo #0/1
+# darker.testdata = BF0712
+# for(i in 1:50) {
+# #darker.testdata$chla_ugL = BF0712$chla_ugL+i
+# darker.testdata$NTL_umolL = BF0712$NTL_umolL+i
+# darker.testdata$DOC_umolL = BF0712$DOC_umolL+i
+# #darker.testdata$lMeanDepth = BF0712$lMeanDepth+0.1*i
+# output[, i+1] = predict(rf.bh0712, newdata = darker.testdata)
+# }
+# output = output-1
+# perc.hypox = colSums(output)/nrow(output)*100
+# 
+# #plot(perc.hypox ~ seq(0,50,1), ylim=c(64,74))
+# 
+# Inc.TN.hypo = perc.hypox
+# Inc.chla.hypo = perc.hypox
+# Inc.DOC.hypo = perc.hypox
+# Inc.TN.DOC.hypo = perc.hypox
+# Inc.TN.chla.hypo = perc.hypox
+# Inc.Chla.DOC.hypo = perc.hypox
+# Inc.TN.chla.DOC.hypo = perc.hypox
+# 
+# par(mfrow = c(2,3))
+# plot(Inc.TN.hypo ~ seq(0,50,1),
+#      las =1,
+#      main = "TN (µM)",
+#      ylab = "Lakes with hypolimnion (%)",
+#      xlab = "Increase of 1 unit")
+# plot(Inc.chla.hypo ~ seq(0,50,1),
+#      las =1,
+#      main = "Chla (µgL)",
+#      ylab = "Lakes with hypolimnion (%)",
+#      xlab = "Increase of 1 unit")
+# plot(Inc.DOC.hypo ~ seq(0,50,1),
+#      las =1,
+#      main = "DOC (µM)",
+#      ylab = "Lakes with hypolimnion (%)",
+#      xlab = "Increase of 1 unit")
+# plot(Inc.TN.chla.hypo ~ seq(0,50,1),
+#      las =1,
+#      main = "TN (µM), Chla (µgL)",
+#      ylab = "Lakes with hypolimnion (%)",
+#      xlab = "Increase of 1 unit")
+# plot(Inc.TN.DOC.hypo ~ seq(0,50,1),
+#      las =1,
+#      main = "TN (µM), DOC (µM)",
+#      ylab = "Lakes with hypolimnion (%)",
+#      xlab = "Increase of 1 unit")
+# plot(Inc.Chla.DOC.hypo ~ seq(0,50,1),
+#      las =1,
+#      main = "Chla (µgL), DOC (µM)",
+#      ylab = "Lakes with hypolimnion (%)",
+#      xlab = "Increase of 1 unit")
+# 
+# #Change in water level
+# output = matrix(nrow = nrow(BF0712), ncol=51)
+# output[,26] = BF0712$Binhypo #0/1
+# darker.testdata = BF0712
+# for(i in c(-25:-1,1:25)) {
+# darker.testdata$lMeanDepth = BF0712$lMeanDepth+0.01*i
+# output[, i+26] = predict(rf.bh0712, newdata = darker.testdata)
+# }
+# output = output-1
+# Chg.Zmean = colSums(output)/nrow(output)*100
+# 
+# plot(Chg.Zmean ~ seq(-25,25,1),
+#      las =1,
+#      main = "Change in Zmean",
+#      ylab = "Lakes with hypolimnion (%)",
+#      xlab = "Step of 1 cm")
+# 
+#      
+# #Apply RF
+# rf.bt0712.light = predict(rf.bh0712, newdata = testdata.bh.light)
+# rf.bt0712.dark = predict(rf.bh0712, newdata = testdata.bh.dark)
+# 
+# confusionMatrix(rf.bt0712.light, rf.bt0712) #0.8726
+# confusionMatrix(rf.bt0712.dark, rf.bt0712)
+
+#Test with Bayesian additive regression tree (BART) and cforest
+# library(mlr)
+# set.seed(101)
+# #Train and test datasets
+# train0712 = sample(1:nrow(BF0712), 0.6*nrow(BF0712))
+# test0712 = which(!1:nrow(BF0712) %in% train0712)
+# 
+# ####Foret aleatoire pour predire l'epaisseur de l'hypolimnion
+# HT07 = merge(x = metadata.hypo07, y = morphohypo07, by = "site_id")
+# HT12 = merge(x = metadata.hypo12, y = morphohypo12, by = "site_id")
+# 
+# metadata.hypo07$DRhypo = Voldevhypo07[,2]
+# metadata.hypo12$DRhypo = Voldevhypo12[,2]
+# 
+# metahypo07.merge = metadata.hypo07[,c(38,63:69)]
+# metahypo12.merge = metadata.hypo12[,c(38,63:69)]
+# 
+# Bin07 = Bin0712[which(Bin0712$year=="2007"),]
+# Bin12 = Bin0712[which(Bin0712$year=="2012"),]
+# 
+# HT07 = merge(metahypo07.merge, Bin07, by="site_id")
+# HT12 = merge(metahypo12.merge, Bin12, by="site_id")
+# 
+# 
+# HT0712 = rbind(HT07, HT12) #"RelO212" "VolT12"  "hypox12" "anox12" 
+# 
+# HTpred = c("lat", "lon","area_km2", "elevation_m", "basinarea_km2", "chla_ugL", "NTL_umolL", "PTL_umolL", "DOC_umolL", "secchi_m", "color_PCU","WALA_ratio", "pct_forest", "pct_agric",  "nutrient_color", "Transparency", "MaxLength", "lMeanDepth","lShorelineDevelopment", "Julian.day", "depthmax_m","HypoThick")#lMinorAxisLength", "lFetch, "DRhypo",
+# 
+# HTF0712 = HT0712[,HTpred]
+# HTF0712$DSR = sqrt(HTF0712$area_km2)/HTF0712$lMeanDepth
+# #TEMPORARY FIX
+# HTF0712$WALA_ratio[458] = HTF0712$WALA_ratio[458]/1000
+# HTF0712$basinarea_km2[458] = HTF0712$basinarea_km2[458]/1000
+# HTF0712.back = HTF0712
+# HTF0712 = HTF0712[,-21]
+# 
+# set.seed(101)
+# #Train and test datasets
+# train0712 = sample(1:nrow(HTF0712), 0.6*nrow(HTF0712))
+# test0712 = which(!1:nrow(HTF0712) %in% train0712)
+# 
+# #Create output matrix and name columns
+# # out.mat = matrix(nrow = ncol(HTF0712))
+# # rownames(out.mat) = c("All", colnames(HTF0712)[-length(colnames(HTF0712))])
+# 
+# #Random Forest on all variables
+# rf.HTF0712 = randomForest(HypoThick~., data=HTF0712, subset = train0712, localImp = TRUE,  ntree=1000)
+# rf.HTFt0712 = predict(rf.HTF0712, newdata = HTF0712[test0712,])
+# 
+# 
+# summary(lm(rf.HTFt0712 ~ HTF0712[test0712,"HypoThick"]))
+# plot(rf.HTFt0712 ~ HTF0712[test0712,"HypoThick"],
+#      xlab = expression(Hypolimnion~thickness),
+#      # xlim = c(-4,4),
+#      # ylim = c(-2,3),
+#      ylab = expression(Predicted~hypolimnion~thickness),
+#      las = 1)
+# rtparty.HT0712 = ctree(HypoThick ~ ., data=HTF0712[test0712,], controls=cforest_control(mtry=NULL, mincriterion=3))
+# #pdf("../output/tree0712.pdf", width = 30, height = 15)
+# plot(rtparty.HT0712)
+# # explain_forest(rf.HTF0712, interactions = TRUE, data = HTF0712[train0712,])
+# 
+# 
+# set.seed(101)
+# #Train and test datasets
+# train0712 = sample(1:nrow(HTF0712), 0.6*nrow(HTF0712))
+# test0712 = which(!1:nrow(HTF0712) %in% train0712)
+# 
+# #Create de subdataset 
+# trainTask_HT <- makeRegrTask(data = HTF0712[train0712,], target = "HypoThick")
+# testTask_HT <- makeRegrTask(data = HTF0712[test0712,], target = "HypoThick")
+# #Create the Learner
+# learnerRF_HT <- makeLearner("regr.cforest", predict.type = "response",ntree=999)
+# learnerBART_HT <- makeLearner("regr.bartMachine", predict.type = "response")
+# 
+# # Create the models
+# modelRF_HT <- mlr::train(learnerRF_HT, task = trainTask_HT)
+# modelBART_HT <- mlr::train(learnerBART_HT, task = trainTask_HT)
+# 
+# #Validate
+# rRF_HT=crossval(learnerRF_HT, testTask_HT, iters = 10L)
+# rBART_HT=crossval(learnerBART_HT, testTask_HT, iters = 10L)
+# 
+# #Create prediction vectors
+# predRF_HT = predict(modelRF_HT, newdata = HTF0712[test0712,])
+# predBART_HT = predict(modelBART_HT, newdata = HTF0712[test0712,])
+# 
+# predENS_HT = (predRF_HT$data$response+predBART_HT$data$response)/2
+# 
+# HypoThick.col = as.character(HTF0712[test0712,"nutrient_color"])
+# HypoThick.col[HypoThick.col=="murky"] = "black"
+# par(mfrow=c(1,3))
+# plot(predRF_HT$data$response~ HTF0712[test0712,"HypoThick"],
+#       xlab = expression(Hypolimnion~thickness),
+#      ylab = expression(Predicted~hypolimnion~thickness),
+#      las = 1,
+#      pch = 16,
+#      col = HypoThick.col,
+#      main = "cforest")
+# plot(predBART_HT$data$response~ HTF0712[test0712,"HypoThick"],
+#       xlab = expression(Hypolimnion~thickness),
+#      ylab = expression(Predicted~hypolimnion~thickness),
+#      las = 1,
+#      pch = 16,
+#      col = HypoThick.col,
+#      main = "BART")
+# plot(predENS_HT~ HTF0712[test0712,"HypoThick"],
+#       xlab = expression(Hypolimnion~thickness),
+#      ylab = expression(Predicted~hypolimnion~thickness),
+#      las = 1,
+#      pch = 16,
+#      col = HypoThick.col,
+#      main = "Ensemble")
+# 
+# summary(lm(predRF_HT$data$response~ HTF0712[test0712,"HypoThick"]))
+# summary(lm(predBART_HT$data$response~ HTF0712[test0712,"HypoThick"]))
+# summary(lm(predENS_HT~ HTF0712[test0712,"HypoThick"]))
+# 
+# #Transform into HypoTop
+# HTF0712.back$HypoTop = HTF0712.back$depthmax_m - HTF0712.back$HypoThick
+# HTF0712.back = HTF0712.back[,-22]
+# 
+# set.seed(101)
+# #Train and test datasets
+# train0712 = sample(1:nrow(HTF0712.back), 0.6*nrow(HTF0712.back))
+# test0712 = which(!1:nrow(HTF0712.back) %in% train0712)
+# 
+# 
+# #Random Forest on all variables
+# rf.HTF0712 = randomForest(HypoTop~., data=HTF0712.back, subset = train0712, localImp = TRUE,  ntree=1000)
+# rf.HTFt0712 = predict(rf.HTF0712, newdata = HTF0712.back[test0712,])
+# 
+# 
+# summary(lm(rf.HTFt0712 ~ HTF0712.back[test0712,"HypoTop"]))
+#      xlab = expression(Top~of~hypolimnion~(m)),
+#      # xlim = c(-4,4),
+#      # ylim = c(-2,3),
+#      ylab = expression(Predicted~top~of~hypolimnion~(m)),
+#      las = 1)
+# rtparty.HT0712 = ctree(HypoTop ~ ., data=HTF0712.back[test0712,], controls=cforest_control(mtry=NULL, mincriterion=3))
+# #pdf("../output/tree0712.pdf", width = 30, height = 15)
+# plot(rtparty.HT0712)
+# # explain_forest(rf.HTF0712, interactions = TRUE, data = HTF0712.back[train0712,])
+# 
+# #Transformer l'epaisseur de l'hypo en proportion du lac
+# RHTF0712 = HTF0712
+# RHTF0712$HypoProp = HTF0712$HypoThick/HTF0712.back$depthmax_m
+# #RHTF0712$HypoProplog = log(HTF0712$HypoThick)/log(HTF0712$sampled_depthmax_m)
+# RHTF0712 = RHTF0712[,-which(colnames(RHTF0712)=="HypoThick")]
+# 
+# #51-73
+# 
+# set.seed(101)
+# #Train and test datasets
+# train0712 = sample(1:nrow(RHTF0712), 0.6*nrow(RHTF0712))
+# test0712 = which(!1:nrow(RHTF0712) %in% train0712)
+# 
+# #Create output matrix and name columns
+# # out.mat = matrix(nrow = ncol(RHTF0712))
+# # rownames(out.mat) = c("All", colnames(RHTF0712)[-length(colnames(RHTF0712))])
+# 
+# #Random Forest on all variables
+# rf.RHTF0712 = randomForest(HypoProp~., data=RHTF0712, subset = train0712, localImp = TRUE, ntree=1000)
+# rf.RHTFt0712 = predict(rf.RHTF0712, newdata = RHTF0712[test0712,])
+# # out.mat[1,1] = mean(abs(RHTF0712[test0712,"HypoProp"] - rf.RHTFt0712))
+# # for(i in 1:(dim(RHTF0712)[2]-1))
+# # {
+# #   RHTF0712.temp = RHTF0712[,-i]
+# #   rf.RHTF0712 = randomForest(HypoProp~., data=RHTF0712.temp, subset = train0712)
+# #   rf.RHTFt0712 = predict(rf.RHTF0712, newdata = RHTF0712.temp[test0712,])
+# #   out.mat[i+1,1] = mean(abs(RHTF0712.temp[test0712,"HypoProp"] - rf.RHTFt0712))
+# # }
+# # as.matrix(out.mat[order(out.mat, decreasing = T),])
+# 
+# summary(lm(rf.RHTFt0712 ~ RHTF0712[test0712,"HypoProp"]))
+# HypoProp.col = as.character(RHTF0712[test0712,"nutrient_color"])
+# HypoProp.col[HypoProp.col=="murky"] = "black"
+# plot(rf.RHTFt0712 ~ RHTF0712[test0712,"HypoProp"],
+#      xlab = expression(Relative~hypolimnion~thickness),
+#      # xlim = c(-4,4),
+#      # ylim = c(-2,3),
+#      ylab = expression(Predicted~relative~hypolimnion~thickness),
+#      las = 1,
+#      pch = 16,
+#      col = HypoProp.col)
+# rtparty.RHT0712 = ctree(HypoProp ~ ., data=RHTF0712[test0712,], controls=cforest_control(mtry=NULL, mincriterion=2))
+# #pdf("../output/tree0712.pdf", width = 30, height = 15)
+# plot(rtparty.RHT0712)
+# 
+# # explain_forest(rf.RHTF0712, interactions = TRUE, data = RHTF0712)
+# 
+# set.seed(101)
+# #Train and test datasets
+# train0712 = sample(1:nrow(HTF0712), 0.6*nrow(HTF0712))
+# test0712 = which(!1:nrow(HTF0712) %in% train0712)
+# 
+# #Create de subdataset 
+# trainTask_RHT <- makeRegrTask(data = RHTF0712[train0712,], target = "HypoProp")
+# testTask_RHT <- makeRegrTask(data = RHTF0712[test0712,], target = "HypoProp")
+# #Create the Learner
+# learnerRF_RHT <- makeLearner("regr.cforest", predict.type = "response",ntree=999)
+# learnerBART_RHT <- makeLearner("regr.bartMachine", predict.type = "response")
+# 
+# # Create the models
+# modelRF_RHT <- mlr::train(learnerRF_RHT, task = trainTask_RHT)
+# modelBART_RHT <- mlr::train(learnerBART_RHT, task = trainTask_RHT)
+# 
+# #Validate
+# rRF_RHT=crossval(learnerRF_RHT, testTask_RHT, iters = 2L)
+# rBART_RHT=crossval(learnerBART_RHT, testTask_RHT, iters = 2L)
+# 
+# #Create prediction vectors
+# predRF_RHT = predict(modelRF_RHT, newdata = RHTF0712[test0712,])
+# predBART_RHT = predict(modelBART_RHT, newdata = RHTF0712[test0712,])
+# 
+# predENS_RHT = (predRF_RHT$data$response+predBART_RHT$data$response)/2
+# 
+# HypoProp.col = as.character(RHTF0712[test0712,"nutrient_color"])
+# HypoProp.col[HypoProp.col=="murky"] = "black"
+# par(mfrow=c(1,3))
+# plot(predRF_RHT$data$response~ RHTF0712[test0712,"HypoProp"],
+#       xlab = expression(Hypolimnion~Propness~(proportion)),
+#      ylab = expression(Predicted~hypolimnion~Propness~(proportion)),
+#      las = 1,
+#      pch = 16,
+#      col = HypoProp.col,
+#      main = "cforest")
+# plot(predBART_RHT$data$response~ RHTF0712[test0712,"HypoProp"],
+#       xlab = expression(Hypolimnion~Propness~(proportion)),
+#      ylab = expression(Predicted~hypolimnion~Propness~(proportion)),
+#      las = 1,
+#      pch = 16,
+#      col = HypoProp.col,
+#      main = "BART")
+# plot(predENS_RHT~ RHTF0712[test0712,"HypoProp"],
+#       xlab = expression(Hypolimnion~Propness~(proportion)),
+#      ylab = expression(Predicted~hypolimnion~Propness~(proportion)),
+#      las = 1,
+#      pch = 16,
+#      col = HypoProp.col,
+#      main = "Ensemble")
+# 
+# summary(lm(predRF_RHT$data$response~ RHTF0712[test0712,"HypoProp"])) #0.62
+# summary(lm(predBART_RHT$data$response~ RHTF0712[test0712,"HypoProp"])) #0.66
+# summary(lm(predENS_RHT~ RHTF0712[test0712,"HypoProp"])) #0.66
+#####
+
+####################################HYPOXIE################################
+
+
+#Foret aléatoire sur %volAnox et Hypox
+# metadata.hypo12 = metadata.hypo12[-which(RHypox12==999)]
+# RHypox12 = RHypox12[-which(RHypox12==999)]
+
+
+RHypox07 = as.data.frame(RHypox07)
+RHypox07$site_id = rownames(RHypox07)
+RHypox12 = as.data.frame(RHypox12)
+RHypox12$site_id = rownames(RHypox12)
+RHypox0712 = c(RHypox07, RHypox12)
+
+##############################Bin hypoxia#####################
+HT07 = merge(x = metadata.hypo07, y = MaxL.0712, by = "site_id",all.x =T)
+
+#Some lakes get duplicated
+HT07 <- HT07[-c(11,14,30,37,45,279),] #0042, 0065,0129, 0169,0225, NLA06608-R5_OTTAWA
+# HT07 = HT07[-277,] #Duplicate line for this lake. Remove shortest length (confirmed on google maps)
+
+HT07$DRhypo = Voldevhypo07[match(x = HT07$siteid_07, Voldevhypo07[,1]),3]
+  # Voldevhypo07[-c(11,14,30,37,45),]
+#Fill missing lake length manually with google maps
+
+
+Temp.id07 = HT07$site_id
+HT07.miss = missForest(HT07[,-c(1,2,3,4,10:15,35,36,37,40,65,66,71)])
+HT07.miss = HT07.miss$ximp
+HT07.miss[which(HT07.miss$secchi_m > HT07.miss$depthmax_m),"secchi_m"] = HT07.miss[which(HT07.miss$secchi_m > HT07.miss$depthmax_m),"depthmax_m"]
+# HT07.miss$Transparency = HT07.miss$secchi_m / HT07.miss$depthmax_m
+HT07.miss$site_id = Temp.id07
+HT07.miss = merge(x=HT07.miss, y=HT07[,c(1,35,71)], by = "site_id")
+
+HT12 = merge(x = metadata.hypo12, y = MaxL.0712, by = "site_id",all.x =T)
+HT12 = HT12[-c(59,99),] #Same as above #NLA06608-1223, NLA06608-R5_OTTAWA
+
+HT12$DRhypo = Voldevhypo12[match(x = HT12$site_id, Voldevhypo12[,1]),3]
+
+Temp.id12 = HT12$site_id
+HT12.miss = missForest(HT12[,-c(1,2,3,4,10:15,35,36,37,40,65,66,71)])
+HT12.miss = HT12.miss$ximp
+HT12.miss[which(HT12.miss$secchi_m > HT12.miss$depthmax_m),"secchi_m"] = HT12.miss[which(HT12.miss$secchi_m > HT12.miss$depthmax_m),"depthmax_m"]
+# HT12.miss$Transparency = HT12.miss$secchi_m / HT12.miss$depthmax_m
+HT12.miss$site_id = Temp.id12
+HT12.miss = merge(x=HT12.miss, y=HT12[,c(1,35,71)], by = "site_id")
+
+HT0712 = rbind(HT07.miss, HT12.miss)
+
+# HT0712$Transparency = HT0712$secchi_m / HT0712$depthmax_m*100
+HT0712$NTL_umolL = HT0712$NTL_ugL/14.0067 #Transform into umol
+HT0712$PTL_umolL = HT0712$PTL_ugL/30.973762 #Transform into umol
+HT0712$DOC_umolL = HT0712$DOC_mgL/12.0107*1000
+HT0712$WALA_ratio = HT0712$basinarea_km2/HT0712$area_km2
+
+#Remove some lake without a hypolimnion
+#These lakes are toward the shallower side. While there was a 1°C/m cuttof twice, the temperature was still 23°C+ in the "hypolimnion". It looks more like micro-stratification within the epilimnion
+HT0712 <- HT0712[!(HT0712$site_id %in% c("NLA06608-1150", "NLA06608-1151", "NLA06608-1434", "NLA06608-2797", "NLA06608-3698", "NLA06608-NELP-3355", "NLA06608-R34","NLA12_UT-126","NLA06608-1223")),]
+#Remove some saline lakes
+# HT0712 <- HT0712[!(HT0712$site_id %in% c("NLA06608-2889", "NLA06608-0064", "NLA06608-0073", "NLA06608-0727")),]
+HT0712 <- HT0712[HT0712$cond_uScm<1000,]
+
+#Remove lakes in 2012 that were half or no profiles
+HT0712 <- HT0712[!(HT0712$site_id %in% c("NLA06608-1292", "NLA06608-3160", "NLA12_WY-116")& HT0712$year==2012),]
+
+#Remove lakes in 2007 that were half or no profiles
+HT0712 <- HT0712[!(HT0712$site_id %in% c("NLA06608-1810")& HT0712$year==2007),]
+
+#Remove 2 lakes because DO doesn't make a lot of sense
+HT0712 <- HT0712[!(HT0712$site_id %in% "NLA06608-1333"),]
+HT0712 <- HT0712[!(HT0712$site_id %in% "NLA06608-0938" & HT0712$year==2012),]
+
+#Change hypoxia state for 1 lake, DO likely taken in sediments and was the only hypoxic depth
+HT0712[HT0712$site_id %in% c("NLA06608-0401","NLA06608-0340",  "NLA06608-1465"), "hypox"] =0
+#Change hypox from 1 to 0. First was likely sampled in sediments, second is metalimnetic minimum
+
+#Change hypoxic state for a few resampled lakes, from oxic to hypoxic on 2nd visit
+HT0712[which(HT0712$site_id %in% c("NLA06608-0038", "NLA06608-0564","NLA06608-0982")& HT0712$year==2007),"hypox"] = 1
+HT0712[which(HT0712$site_id %in% c("NLA06608-0514", "NLA06608-0982")& HT0712$year==2012),"hypox"] = 1
+
+
+BHpred = c("lat", "lon","area_km2", "elevation_m", "basinarea_km2", "chla_ugL", "NTL_umolL", "PTL_umolL", "DOC_umolL", "secchi_m", "color_PCU","WALA_ratio", "pct_forest", "pct_agric",  "nutrient_color",  "MaxLength", "lMeanDepth","lShorelineDevelopment", "Julian.day","DRhypo", "hypox", "depthmax_m", "deltaT_C", "deepT_C")#lMinorAxisLength", "lFetch,"Transparency",
+
+BHF0712 = HT0712[,BHpred] #BinHypoxForest BAF
+BHF0712$DSR = sqrt(BHF0712$area_km2)/BHF0712$lMeanDepth
+#The watershed of the following lake is clearly smaller than what is in the database
+#A quick search indicate that the lake is constrained in a 413 km^2, but the watershed in the nearest vicinity is likely much smaller
+#We assumed a typo, and divided by 1000 to have a watershed area of ~195 km2
+BHF0712$WALA_ratio[442] = BHF0712$WALA_ratio[442]/1000
+BHF0712$basinarea_km2[442] = BHF0712$basinarea_km2[442]/1000
+BHF0712.back = BHF0712
+BHF0712 = BHF0712[,-22]
+
+#This one is used as a predictive model for shallow lakes. We removed DSRhypo because there won't be any hypo in shallow lakes
+ BHF0712.shal <- BHF0712[,-20] #Removes DRHypo variable
+
+# set.seed(101)
+# #Train and test datasets
+# train0712 = sample(1:nrow(BHF0712), 0.6*nrow(BHF0712))
+# test0712 = which(!1:nrow(BHF0712) %in% train0712)
+# 
+# train0712.test = sample(1:nrow(BHF0712.test), 0.6*nrow(BHF0712.test))
+# test0712.test = which(!1:nrow(BHF0712.test) %in% train0712.test)
+# 
+# #Random Forest on all variables
+# rf.BHF0712 = randomForest(hypox~., data=BHF0712, subset = train0712, localImp = TRUE,
+#                           ntree = 1000)
+# rf.BHFt0712 = predict(rf.BHF0712, newdata = BHF0712[test0712,])
+# confusionMatrix(rf.BHFt0712, BHF0712[test0712,"hypox"]) #0.83
+# 
+# plot(rf.BHFt0712 ~ BHF0712[test0712,"hypox"],
+#      xlab = expression(Hypoxia),
+#      # xlim = c(-4,4),
+#      # ylim = c(-2,3),
+#      ylab = expression(Predicted~hypoxia),
+#      las = 1)
+# rtparty.BHT0712 = ctree(hypox ~ ., data=BHF0712[test0712,], controls=cforest_control(mtry=NULL, mincriterion=3))
+# #pdf("../output/tree0712.pdf", width = 30, height = 15)
+# plot(rtparty.BHT0712)
+# # explain_forest(rf.BHF0712, interactions = TRUE, data = BHF0712[test0712,])
+
+
+
+#With caret
+control <- trainControl(method='repeatedcv',
+                        number=10,
+                        repeats=3,
+                        search='grid')
+#create tunegrid with 15 values from 1:15 for mtry to tunning model. Our train function will #change number of entry variable at each split according to tunegrid.
+tunegrid <- expand.grid(.mtry = (1:20))
+#Random generate 15 mtry values with tuneLength = 15
+set.seed(101)
+
+rf_gridsearch.hypox <- caret::train(hypox ~.,
+                       data = BHF0712,
+                       method = "rf",
+                       metric = "Accuracy",
+                       tuneGrid = tunegrid,
+                        trControl = control)
+
+#Random forest for later in the script (for shallow lake hypoxia prediction)
+rf_gridsearch.hypox.shal <- caret::train(hypox ~.,
+                       data = BHF0712.shal,
+                       method = "rf",
+                       metric = "Accuracy",
+                       tuneGrid = tunegrid,
+                        trControl = control)
+
+#confusionMatrix(rf_gridsearch.hypox)
+pdf("../../../NLA paper/Figures/Fig.3a_V2.pdf")
+plot(varImp(rf_gridsearch.hypox), main = "Hypoxia (presence/absence)")
+dev.off()
+
+pdf("../../../NLA paper/Figures/Fig. S3V2.pdf")
+plot(BHF0712$hypox ~ BHF0712$lMeanDepth,
+     las = 1,
+     xlab = "Mean depth (m)",
+     ylab = "Hypoxia",
+     col = c("#228833","#66CCEE"))
+dev.off()
+
+#Create df to map the results
+#Assign RF value based on votes
+RF.classif.hypox <- rf_gridsearch.hypox$finalModel$predicted
+Obs.classif.hypox <- BHF0712$hypox
+pch.code.hypox <- ifelse(RF.classif.hypox==Obs.classif.hypox, 1, 0)
+
+RF.classif.hypox.test <- as.character(RF.classif.hypox)
+RF.classif.hypox.test[RF.classif.hypox.test =="0"]="2"
+RF.classif.hypox.test = as.factor(RF.classif.hypox.test)
+Obs.classif.hypox.test <- as.character(Obs.classif.hypox)
+Obs.classif.hypox.test[Obs.classif.hypox.test =="0"]="2"
+Obs.classif.hypox.test = as.factor(Obs.classif.hypox.test)
+
+
+confusionMatrix(RF.classif.hypox.test ,Obs.classif.hypox.test,mode = "prec_recall")
+
+# Accuracy : 0.85
+# Precision : 0.90
+# Recall : 0.88
+# F1 : 0.89
+
+#Store which lakes are predicted to be hypoxic but are not
+Confusion01.hypox <- data.frame(Lake_ID=HT0712[RF.classif.hypox==1 & Obs.classif.hypox==0,"site_id"],Potential=rep(NA,31))
+#In second column, store if the lake could become hypoxic given DOY and O2mg/L (done manually)
+Confusion01.hypox[,2] <- c(1,1,1,0,0,1,1,0,0,1,1,1,1,1,0,0,1,0,1,1,1,1,1,0,1,1,1,0,1,0,1) #67.7%% likely that "not hypoxic" will be hypoxic during the season
+
+# Confusion01.hypox
+#                 Lake_ID Potential
+#######           NLA06608-0090        1 (almost hypoxic on 2nd visit)
+# 1         NLA06608-0169        1
+# 2         NLA06608-0189        1 (almost hypoxic 2nd profile, but was incomplete)
+####### 3         NLA06608-0291        0
+####### 5         NLA06608-0468        1 (at 4mg/L on 08/1)
+# 4         NLA06608-0514        1 (hypoxic in 2012)
+####### 5         NLA06608-0564        1 (hypoxic on 2nd visit)
+# 6         NLA06608-0581        0 (potentially but hard to tell)
+####### 7         NLA06608-0658        1 (was almost hypoxic)
+# 8         NLA06608-0738        0 (potentially but hard to tell)
+# 7         NLA06608-0754        1 (metalimnetic maximum early in the season and low DO at bottom)
+# 9         NLA06608-0850        1 (was almost entirely almost hypoxic)
+####### 10        NLA06608-0982        1 (hypoxic on 2nd visit)
+# 13        NLA06608-1166        0 (maybe in the future)
+# 14        NLA06608-1183        0 (whole lake is at ~6mg/L on 08/29)
+####### 13        NLA06608-1270        0 (wholelake at 9mg/L+)
+# 16        NLA06608-1483        1 (hypoxic in 2012 with half profile)
+####### 15        NLA06608-1511        1 (likely, at 6.3mg/L on 06/12)
+# 13        NLA06608-1529        1 (at 5.4 mg/L on 06/19)
+# 17        NLA06608-1538        1 (hypoxic in 2012)
+# 18        NLA06608-1674        1 (deepest layer at 2.4 mg/L on 07/27)
+# 19        NLA06608-1857        1 (deepest layer at 2.7 mg/L on 07/25)
+# 20        NLA06608-2266        0 (whole lake at 7mg/L+)
+# 16        NLA06608-2429        0 (possibly but 0 to be conservative)
+####### 22        NLA06608-2889        NA
+# 24        NLA06608-3846        1 (bottom at 2.4 mg/L on 07/12)
+# 25 NLA06608-ELS_1E1-052        0 (whole lake at 6mg/L+ on 08/7)
+# 26 NLA06608-ELS_1E3-012        1 (almost hypoxic in 2007)
+####### 28         NLA06608-R32        1 (at 3.9 on 08/1)
+####### 30        NLA06608-0102        0 (6+mg/L on 07/31)
+####### 21        NLA06608-0295        1 (already lost 2mg/L on 06/6)
+####### 33        NLA06608-0938        1 (was hypoxic in 2007 on a later date)
+####### 25        NLA06608-0982        1 (was hypoxic on 2nd visit in 2012)
+# 23        NLA06608-0994        1 (at 2.1 mg/L on 06/14)
+####### 36        NLA06608-1465        1 (almost hypoxic in 2007, 3 weeks later)
+####### 25        NLA06608-1810        NA (half profile in 2007)
+# 37        NLA06608-2082        1 (possible)
+####### 23 NLA06608-ELS_1E3-012        1 (almost hypoxic in 2007 1 month later)
+# 39 NLA06608-ELS_2C3-018        1 (hypoxic in 2007 on later date)
+# 23      NLA06608-NH4912        1 (almost hypoxic in 2007 on later date)
+####### 40         NLA12_CA-116        1 (at 4.3mg/L on 06/12)
+# 41         NLA12_CA-212        0 (highly unlikely 7 mg/L late in the season)
+# 42         NLA12_ID-175        1 (at 6mg/L early in the season)
+# 6          NLA12_ME-114        1 (at 2.3mg/L early on 07/18)
+# 43         NLA12_MT-143        1 (at 6mg/L early in the season)
+# 27         NLA12_MT-162        0
+# 44         NLA12_ND-178        1 (at 4.8 mg/L early in the season)
+####### 31         NLA12_MT-162        0 (possibly, but 0 to be conservative)
+####### 45         NLA12_ND-R17        1 (almost hypoxic)
+####### 46         NLA12_WA-118        0 (possibly, but 0 to be conservative)
+# 47         NLA12_WI-161        0 (possibly, but 0 to be conservative)
+# 49         NLA12_WY-125        1 (possibly, 4mg/L on 09/6)
+
+
+#Do the same for hypoxic lake predicted to be oxic
+Confusion10.hypox <- data.frame(Lake_ID=HT0712[RF.classif.hypox==0 & Obs.classif.hypox==1,"site_id"],Potential=rep(NA,35))
+
+#                 Lake_ID Potential
+# 1         NLA06608-0038        NA
+# 1         NLA06608-0065        NA (low chlorophyll, DOC, color and TP)
+# 2         NLA06608-0137        NA (low chlorophyll, DOC, color and TP)
+# 3         NLA06608-0209        NA (low chlorophyll, DOC, color and TP)
+# 4         NLA06608-0225        NA (low chlorophyll, DOC, color and TP)
+# 5         NLA06608-0260        NA
+# 7         NLA06608-0373        NA
+# 8         NLA06608-0386        NA
+# 9         NLA06608-0593        NA
+####### 9         NLA06608-0914        NA (correctly identified as hypoxic in 2012)
+####### 10        NLA06608-0938        1 (2012 was incorrectly classified as hypoxic, vice-versa for 2007)
+####### 11        NLA06608-0950        NA (high conductivity at 680+)
+# 12        NLA06608-1058        NA
+# 14        NLA06608-1473        NA
+####### 15        NLA06608-1537        NA
+# 16        NLA06608-1818        NA
+# 17        NLA06608-1953        NA
+# 12        NLA06608-2114        NA (was hypoxic in 2007)
+# 18        NLA06608-2185        NA
+# 19        NLA06608-2874        NA
+# 20        NLA06608-3153        NA
+######## 21 NLA06608-EMAP_ME011L        NA
+# 22   NLA06608-NELP-1330        NA
+# 23   NLA06608-NELP-2155        NA
+# 24   NLA06608-R10BULLTR        NA
+# 25   NLA06608-R10RAINYL        NA
+# 26   NLA06608-R10SQUAWL        NA
+####### 27        NLA06608-0551        NA (correctly classified in 2007)
+# 28        NLA06608-0687        NA (correctly classified in 2007)
+# 29        NLA06608-0906        NA (correctly classified in 2007)
+####### 30        NLA06608-0942        NA (correctly classified in 2007)
+####### 31        NLA06608-1447        NA (correctly classified in 2007)
+####### 32        NLA06608-1483        NA (classified as hypoxic in 2007)
+# 33        NLA06608-1857        NA (classified as hypoxic in 2007)
+# 34   NLA06608-R5_OTTAWA        NA (correctly classified in 2007)
+# 35         NLA12_ID-215        NA
+# 36         NLA12_ID-218        NA
+####### 37         NLA12_MN-132        NA
+# 38         NLA12_MT-152        NA
+# 39         NLA12_NM-138        NA 
+# 40         NLA12_NV-137        NA (anoxic puddle)
+# 41         NLA12_OR-126        NA
+####### 42         NLA12_PA-108        NA (not well stratified yet, sampled on 05/30)
+# 33       NLA12_PA-119        NA (late hypoxia)
+# 34       NLA12_UT-210        NA
+####### 43         NLA12_UT-122        NA
+####### 44         NLA12_WA-R09        NA
+# 45         NLA12_WY-R08        NA
+
+
+
+#Create df
+rf.hypox = data.frame(lon = BHF0712$lon,
+                     lat = BHF0712$lat,
+                     RF.classif.hypox,
+                     pch.code.hypox,
+                     nut_col = BHF0712$nutrient_color)
+#Single tree
+hypox.tree = caret::train(hypox ~ ., 
+                  data=BHF0712, 
+                  method="rpart", 
+                  trControl = control)
+
+tree.classif.hypox <- as.data.frame(predict(hypox.tree$finalModel))
+tree.classif.hypox[,3] = 1
+tree.classif.hypox[tree.classif.hypox[,2]<0.5,3] = 0
+
+tree.classif.hypox.test <- as.character(tree.classif.hypox[,3])
+tree.classif.hypox.test[tree.classif.hypox.test =="0"]="2"
+tree.classif.hypox.test = as.factor(tree.classif.hypox.test)
+Obs.classif.hypox.test <- as.character(Obs.classif.hypox)
+Obs.classif.hypox.test[Obs.classif.hypox.test =="0"]="2"
+Obs.classif.hypox.test = as.factor(Obs.classif.hypox.test)
+
+confusionMatrix(as.factor(tree.classif.hypox.test),Obs.classif.hypox.test,mode = "prec_recall")
+
+# Accuracy : 0.82
+# Precision : 0.84
+# Recall : 0.91
+# F1 : 0.87
+
+fancyRpartPlot(hypox.tree$finalModel)
+
+#Test with each nutrient-color groups
+#RF
+BHF0712.blue = BHF0712[BHF0712$nutrient_color=="blue",]
+BHF0712.blue = BHF0712.blue[,-c(15,24)]
+BHF0712.green = BHF0712[BHF0712$nutrient_color=="green",]
+BHF0712.green = BHF0712.green[,-c(15,24)]
+BHF0712.brown = BHF0712[BHF0712$nutrient_color=="brown",]
+BHF0712.brown = BHF0712.brown[,-c(15,24)]
+BHF0712.murky = BHF0712[BHF0712$nutrient_color=="murky",]
+BHF0712.murky = BHF0712.murky[,-c(15,24)]
+
+
+rf_gridsearch.hypox.blue <- caret::train(hypox ~.,
+                       data = BHF0712.blue,
+                       method = "rf",
+                       metric = "Accuracy",
+                       tuneGrid = tunegrid,
+                        trControl = control)
+
+blue.predict = rf_gridsearch.hypox.blue$finalModel$predicted
+blue.hypox <- BHF0712.blue$hypox
+
+blue.predict.test <- as.character(blue.predict)
+blue.predict.test[blue.predict.test =="0"]="2"
+blue.predict.test = as.factor(blue.predict.test)
+blue.hypox.test <- as.character(blue.hypox)
+blue.hypox.test[blue.hypox.test =="0"]="2"
+blue.hypox.test = as.factor(blue.hypox.test)
+
+confusionMatrix(blue.predict.test,blue.hypox.test,mode = "prec_recall")
+
+
+rf_gridsearch.hypox.green <- caret::train(hypox ~.,
+                       data = BHF0712.green,
+                       method = "rf",
+                       metric = "Accuracy",
+                       tuneGrid = tunegrid,
+                        trControl = control)
+
+green.predict = rf_gridsearch.hypox.green$finalModel$predicted
+green.hypox <- BHF0712.green$hypox
+
+green.predict.test <- as.character(green.predict)
+green.predict.test[green.predict.test =="0"]="2"
+green.predict.test = as.factor(green.predict.test)
+green.hypox.test <- as.character(green.hypox)
+green.hypox.test[green.hypox.test =="0"]="2"
+green.hypox.test = as.factor(green.hypox.test)
+
+confusionMatrix(green.predict.test,green.hypox.test,mode = "prec_recall")
+
+
+rf_gridsearch.hypox.brown <- caret::train(hypox ~.,
+                       data = BHF0712.brown,
+                       method = "rf",
+                       metric = "Accuracy",
+                       tuneGrid = tunegrid,
+                        trControl = control)
+
+brown.predict = rf_gridsearch.hypox.brown$finalModel$predicted
+brown.hypox <- BHF0712.brown$hypox
+
+brown.predict.test <- as.character(brown.predict)
+brown.predict.test[brown.predict.test =="0"]="2"
+brown.predict.test = as.factor(brown.predict.test)
+brown.hypox.test <- as.character(brown.hypox)
+brown.hypox.test[brown.hypox.test =="0"]="2"
+brown.hypox.test = as.factor(brown.hypox.test)
+
+confusionMatrix(brown.predict.test,brown.hypox.test,mode = "prec_recall")
+
+rf_gridsearch.hypox.murky <- caret::train(hypox ~.,
+                       data = BHF0712.murky,
+                       method = "rf",
+                       metric = "Accuracy",
+                       tuneGrid = tunegrid,
+                        trControl = control)
+
+murky.predict = rf_gridsearch.hypox.murky$finalModel$predicted
+murky.hypox <- BHF0712.murky$hypox
+
+murky.predict.test <- as.character(murky.predict)
+murky.predict.test[murky.predict.test =="0"]="2"
+murky.predict.test = as.factor(murky.predict.test)
+murky.hypox.test <- as.character(murky.hypox)
+murky.hypox.test[murky.hypox.test =="0"]="2"
+murky.hypox.test = as.factor(murky.hypox.test)
+
+confusionMatrix(murky.predict.test,murky.hypox.test,mode = "prec_recall")
+
+pdf("../../../NLA paper/Figures/Fig. S8aV2.pdf")
+plot(varImp(rf_gridsearch.hypox.blue), main = "Blue lakes")
+dev.off()
+pdf("../../../NLA paper/Figures/Fig. S8bV2.pdf")
+plot(varImp(rf_gridsearch.hypox.brown), main = "Brown lakes")
+dev.off()
+pdf("../../../NLA paper/Figures/Fig. S8cV2.pdf")
+plot(varImp(rf_gridsearch.hypox.green), main = "Green lakes")
+dev.off()
+pdf("../../../NLA paper/Figures/Fig. S8dV2.pdf")
+plot(varImp(rf_gridsearch.hypox.murky), main = "Murky lakes")
+dev.off()
+
+
+# Relationship between TN and TP, log scale
+plot(BHF0712$NTL_umolL~BHF0712$PTL_umolL, las = 1, xlim = c(0,15),
+     xlab = expression(TP~(mu*mol~L^-1)),
+     ylab = expression(TN~(mu*mol~L^-1)))
+
+abline(0,16)
+
+pdf("../../../NLA paper/Hypoxia tree.pdf")
+fancyRpartPlot(hypox.tree$finalModel)
+dev.off()
+
+
+#Create map
+{
+p1 <- ggplot(rf.hypox,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_map("conic", lat0 = 30)+
+    geom_point(data=rf.hypox[rf.hypox$RF.classif.hypox==1,],
+               aes(x=lon,
+                   y=lat, 
+                   shape=as.factor(pch.code.hypox), 
+                   color=as.factor(RF.classif.hypox), 
+                   fill = as.factor(RF.classif.hypox), 
+                   alpha = 0.1),
+               size=2)+
+    scale_shape_manual(values = c(25,21))+
+    scale_color_manual(values=c("black",'black'))+
+    scale_fill_manual(values=c("#66CCEE", "#228833")[2])+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_blank(),
+          axis.title = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank())
+
+p2 <- ggplot(rf.hypox,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_map("conic", lat0 = 30)+
+    geom_point(data=rf.hypox[rf.hypox$RF.classif.hypox==0,],
+               aes(x=lon,
+                   y=lat, 
+                   shape=as.factor(pch.code.hypox), 
+                   color=as.factor(RF.classif.hypox), 
+                   fill = as.factor(RF.classif.hypox), 
+                   alpha = 0.1),
+               size=2)+
+    scale_shape_manual(values = c(25,21))+
+    scale_color_manual(values=c("black",'black'))+
+    scale_fill_manual(values=c("#66CCEE", "#228833")[1])+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_blank(),
+          axis.title = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank())
+grid.arrange(p1, p2, nrow = 2)
+ggsave("../../../NLA paper/Figures/Fig. S3-NEW.pdf", plot = grid.arrange(p1, p2, nrow = 2), width = 10, height = 6)
+}
+#Estimate shifting lakes with increased nutrients
+
+#Maps for murky, green and brown lakes. For reviewers
+{
+p_murk <- ggplot(rf.hypox,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_map("conic", lat0 = 30)+
+    geom_point(data=rf.hypox[rf.hypox$nut_col=="murky",],
+               aes(x=lon,
+                   y=lat, 
+                   shape=as.factor(pch.code.hypox), 
+                   color=as.factor(RF.classif.hypox), 
+                   fill = as.factor(RF.classif.hypox), 
+                   alpha = 0.1),
+               size=2)+
+    scale_shape_manual(values = c(21))+
+    scale_color_manual(values=c("black",'black'))+
+    scale_fill_manual(values=c("#66CCEE", "#228833"))+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_blank(),
+          axis.title = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank())
+
+p_brown <- ggplot(rf.hypox,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_map("conic", lat0 = 30)+
+    geom_point(data=rf.hypox[rf.hypox$nut_col=="brown",],
+               aes(x=lon,
+                   y=lat, 
+                   shape=as.factor(pch.code.hypox), 
+                   color=as.factor(RF.classif.hypox), 
+                   fill = as.factor(RF.classif.hypox), 
+                   alpha = 0.1),
+               size=2)+
+    scale_shape_manual(values = c(25,21))+
+    scale_color_manual(values=c("black",'black'))+
+    scale_fill_manual(values=c("#66CCEE", "#228833"))+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_blank(),
+          axis.title = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank())
+
+p_green <- ggplot(rf.hypox,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_map("conic", lat0 = 30)+
+    geom_point(data=rf.hypox[rf.hypox$nut_col=="green",],
+               aes(x=lon,
+                   y=lat, 
+                   shape=as.factor(pch.code.hypox), 
+                   color=as.factor(RF.classif.hypox), 
+                   fill = as.factor(RF.classif.hypox), 
+                   alpha = 0.1),
+               size=2)+
+    scale_shape_manual(values = c(25,21))+
+    scale_color_manual(values=c("black",'black'))+
+    scale_fill_manual(values=c("#66CCEE", "#228833"))+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_blank(),
+          axis.title = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank())
+
+grid.arrange(p_brown, p_green, p_murk, nrow = 3)
+ggsave("../../../NLA paper/Figures/Fig. Murky_location.pdf", plot = grid.arrange(p_brown, p_green, p_murk, nrow = 3), width = 12, height = 8)
+}
+
+
+output = matrix(nrow = 26, ncol = 7)
+colnames(output) = c("Inc.DOC", "Inc.TN","Inc.chla","Inc.DOC.TN" , "Inc.DOC.chla", "Inc.TN.chla", "Inc.DOC.TN.chla")
+
+
+for(j in 1:7){
+  output.temp = matrix(nrow = nrow(BHF0712), ncol=26)
+  output.temp[,1] = BHF0712$hypox #0/1
+  eutro.testdata = BHF0712
+  for(i in 1:25) {
+    #The scalars are the delta between 25 and 0 quantile, divided by 25
+    if(j ==1 | j==4 | j== 5 | j==7) eutro.testdata$DOC_umolL = BHF0712$DOC_umolL+8.2508*i
+    if(j ==2 | j==4 | j== 6 | j==7) eutro.testdata$NTL_umolL = BHF0712$NTL_umolL+0.514*i
+    if(j ==3 | j==5 | j== 6 | j==7) eutro.testdata$chla_ugL = BHF0712$chla_ugL+0.05552*i 
+    output.temp[, i+1] = predict(rf_gridsearch.hypox, newdata = eutro.testdata)
+    if(j==4 & i==25) Fig4_v2d = predict(rf_gridsearch.hypox, newdata = eutro.testdata)
+  }
+  output.temp = output.temp-1
+  perc.hypox = colSums(output.temp)/nrow(output.temp)*100
+  output[,j]=perc.hypox
+}
+# 
+# 
+# {
+#   pdf("../../../NLA paper/Figures/Fig. S4-NEW.pdf", width=8)
+# par(mfrow = c(2,3))
+# par(mar = c(4,4,2,.5)+0.1)
+# plot(output[,1] ~ seq(0,25,1),
+#      las =1,
+#      main = "DOC (µM)",
+#      ylab = "Hypolimnion with hypoxia (%)",
+#      xlab = "",
+#      ylim = c(67,81),
+#      pch = 21,
+#      bg = "#228833")
+# mtext(text = "a", side = 3, line = 0, at = -5)
+# plot(output[,2] ~ seq(0,25,1),
+#      las =1,
+#      main = "TN (µM)",
+#      ylab = "",
+#      xlab = "",
+#      ylim = c(67,81),
+#      pch = 21,
+#      bg = "#228833")
+# mtext(text = "b", side = 3, line = 0, at = -5)
+# plot(output[,3] ~ seq(0,25,1),
+#      las =1,
+#      main = "Chlorophyll (µg/L)",
+#      ylab = "",
+#      xlab = "",
+#      ylim = c(67,81),
+#      pch = 21,
+#      bg = "#228833")
+# mtext(text = "c", side = 3, line = 0, at = -5)
+# plot(output[,6] ~ seq(0,25,1),
+#      las =1,
+#      main = "TN (µM), Chla (µg/L)",
+#      ylab = "Hypolimnion with hypoxia (%)",
+#      xlab = "Increase of 1/25 quartile",
+#      ylim = c(67,81),
+#      pch = 21,
+#      bg = "#228833")
+# mtext(text = "d", side = 3, line = 0, at = -5)
+# plot(output[,5] ~ seq(0,25,1),
+#      las =1,
+#      main = "DOC (µM), Chla (µgL)",
+#      ylab = "",
+#      xlab = "Increase of 1/25 quartile",
+#      ylim = c(67,81),
+#      pch = 21,
+#      bg = "#228833")
+# mtext(text = "e", side = 3, line = 0, at = -5)
+# plot(output[,4] ~ seq(0,25,1),
+#      las =1,
+#      main = "DOC (µM), TN (µM)",
+#      ylab = "",
+#      xlab = "Increase of 1/25 quartile",
+#      ylim = c(67,81),
+#      pch = 21,
+#      bg = "#228833")
+# mtext(text = "f", side = 3, line = 0, at = -5)
+# dev.off()
+# }
+
+
+{
+  pdf("../../../NLA paper/Figures/Fig.4_V2.pdf", width=8)
+par(mfrow = c(2,2))
+par(mar = c(4,4,2,.5)+0.1)
+plot(output[,1] ~ seq(0,25,1),
+     las =1,
+     main = "DOC (µM)",
+     ylab = "Hypolimnion with hypoxia (%)",
+     xlab = "",
+     ylim = c(67,83),
+     pch = 21,
+     bg = "#228833")
+mtext(text = "a", side = 3, line = 0, at = -5)
+plot(output[,2] ~ seq(0,25,1),
+     las =1,
+     main = "TN (µM)",
+     ylab = "",
+     xlab = "",
+     ylim = c(67,83),
+     pch = 21,
+     bg = "#228833")
+mtext(text = "b", side = 3, line = 0, at = -5)
+plot(output[,4] ~ seq(0,25,1),
+     las =1,
+     main = "DOC (µM), TN (µM)",
+     ylab = "",
+     xlab = "Increase of 1/25 quartile",
+     ylim = c(67,83),
+     pch = 21,
+     bg = "#228833")
+mtext(text = "c", side = 3, line = 0, at = -5)
+
+plot(BHF0712$hypox ~ BHF0712$lMeanDepth,
+     xlab = "Mean depth (m)",
+     ylab = "Hypoxic state",
+     col = c("#228833","#66CCEE"))
+par(new=T)
+plot(as.factor(Fig4_v2d)~BHF0712$lMeanDepth,
+     xlab = "",
+     ylab = "",
+     axes = FALSE,
+     col = makeTransparent(c("#228833","#66CCEE")))
+mtext(text = "d", side = 3, line = 0, at = -0.05)
+
+dev.off()
+}
+
+
+# #Modified in Inkscape
+# {
+#   pdf("../../../NLA paper/Figures/Fig. 4-NEW.pdf", width = 8, height = 4.5, useDingbats = F)
+#   par(mfrow=c(1,2))
+# plot(output[,7] ~ seq(0,25,1),
+#      las =1,
+#      main = "",
+#      ylab = "Lakes developing hypoxic hypolimnia (%)",
+#      xlab = "Increase of 1/25 quartile",
+#      ylim = c(67,82),
+#      pch = 21,
+#      bg = "#228833",
+#      cex = 1)
+# mtext(text = "a", side = 3, line = 0, at = -5)
+# 
+# #makeTransparent(c("#66CCEE","#228833"))
+# plot(BHF0712$hypox ~ BHF0712$lMeanDepth,
+#      xlab = "Mean depth (m)",
+#      ylab = "Hypoxic state",
+#      col = c("#228833","#66CCEE"))
+# par(new=T)
+# plot(as.factor(output.temp[,26])~BHF0712$lMeanDepth,
+#      xlab = "",
+#      ylab = "",
+#      axes = FALSE,
+#      col = makeTransparent(c("#228833","#66CCEE")))
+# mtext(text = "b", side = 3, line = 0, at = -0.05)
+# dev.off()
+# }
+
+
+
+
+##########Hypoxia in shallow lakes
+Shal.HT07 = merge(x = Metashallow07, y = MaxL.0712, by = "site_id",all.x =T)
+# Shal.HT07 = Shal.HT07[-c(10,111),] #NLA06608-0078, NLA06608-1223
+
+#Fill missing lake length manually with google maps
+
+Temp.id07 = Shal.HT07$site_id
+Shal.HT07.miss = missForest(Shal.HT07[,-c(1,2,3,4,10:15,35,36,37,40,65,68)])
+Shal.HT07.miss = Shal.HT07.miss$ximp
+Shal.HT07.miss[which(Shal.HT07.miss$secchi_m > Shal.HT07.miss$depthmax_m),"secchi_m"] = Shal.HT07.miss[which(Shal.HT07.miss$secchi_m > Shal.HT07.miss$depthmax_m),"depthmax_m"]
+# Shal.HT07.miss$Transparency = Shal.HT07.miss$secchi_m / Shal.HT07.miss$depthmax_m
+Shal.HT07.miss$site_id = Temp.id07
+Shal.HT07.miss = merge(x=Shal.HT07.miss, y=Shal.HT07[,c(1,35,68)], by = "site_id")
+
+Shal.HT12 = merge(x = Metashallow12, y = MaxL.0712, by = "site_id",all.x =T)
+# Shal.HT12 = Shal.HT12[-44,] #Same as above, but remove shortest. Two basin of the same lake connected by almost a tiny river
+
+Temp.id12 = Shal.HT12$site_id
+Shal.HT12.miss = missForest(Shal.HT12[,-c(1,2,3,4,10:15,35,36,37,40,65,68)])
+Shal.HT12.miss = Shal.HT12.miss$ximp
+Shal.HT12.miss[which(Shal.HT12.miss$secchi_m > Shal.HT12.miss$depthmax_m),"secchi_m"] = Shal.HT12.miss[which(Shal.HT12.miss$secchi_m > Shal.HT12.miss$depthmax_m),"depthmax_m"]
+# Shal.HT12.miss$Transparency = Shal.HT12.miss$secchi_m / Shal.HT12.miss$depthmax_m
+Shal.HT12.miss$site_id = Temp.id12
+Shal.HT12.miss = merge(x=Shal.HT12.miss, y=Shal.HT12[,c(1,35,68)], by = "site_id")
+
+Shal.HT0712 = rbind(Shal.HT07.miss, Shal.HT12.miss)
+
+Shal.HT0712$NTL_umolL = Shal.HT0712$NTL_ugL/14.0067 #Transform into umol
+Shal.HT0712$PTL_umolL = Shal.HT0712$PTL_ugL/30.973762 #Transform into umol
+Shal.HT0712$DOC_umolL = Shal.HT0712$DOC_mgL/12.0107*1000
+
+Shal.BHpred = c("lat", "lon","area_km2", "elevation_m", "basinarea_km2", "chla_ugL", "NTL_umolL", "PTL_umolL", "DOC_umolL", "secchi_m", "color_PCU","WALA_ratio", "pct_forest", "pct_agric",  "nutrient_color",  "MaxLength", "lMeanDepth","lShorelineDevelopment", "Julian.day", "hypox", "depthmax_m",  "deltaT_C")#lMinorAxisLength", "lFetch, "Transparency",
+
+Shal.BHF0712 = Shal.HT0712[,Shal.BHpred] #BinHypoxForest BAF
+Shal.BHF0712$DSR = sqrt(Shal.BHF0712$area_km2)/Shal.BHF0712$lMeanDepth
+
+Shal.BHF0712 = Shal.BHF0712[,-21] #Remove Max Depth
+
+#Not useful
+# Shallow.rf_gridsearch.hypox <- caret::train(hypox ~.,
+#                        data = Shal.BHF0712,
+#                        method = "rf",
+#                        metric = "Accuracy",
+#                        tuneGrid = tunegrid,
+#                         trControl = control)
+# 
+# pdf("../../../NLA paper/Hypox-Shallow.pdf")
+# plot(varImp(Shallow.rf_gridsearch.hypox), main = "Hypoxia (presence/absence)")
+# dev.off()
+
+# Shal.hypox.pred = Shallow.rf_gridsearch.hypox$finalModel$predicted
+# Shal.hypox.obs = Shal.BHF0712$hypox
+
+# confusionMatrix(Shal.hypox.pred.test ,Shal.hypox.obs.test,mode = "prec_recall")
+
+#We use the previous RF to estimate the number of shallow lakes that could be hypoxic
+
+Shallow.predict = predict(rf_gridsearch.hypox.shal, newdata = Shal.BHF0712)
+Shallow.hypox <- Shal.BHF0712$hypox
+Shallow.color.code <- ifelse(Shallow.predict==Shallow.hypox, 1, 0)
+
+
+confusionMatrix(Shallow.predict,Shallow.hypox,mode = "prec_recall")
+#Shallow lakes that could become hypoxic. I did not include the 6 lakes that are hypoxic but the random forest misclassified.
+#(272+40)/(73+272+70) #83.4%
+
+#Create df
+rf.hypox.shallow = data.frame(lon = Shal.BHF0712$lon,
+                     lat = Shal.BHF0712$lat,
+                     Shallow.predict,
+                     Shallow.color.code)
+#Create map
+#Observed Hypoxia
+ggplot(rf.hypox.shallow,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_fixed(1.3)+
+    geom_point(data=Shal.BHF0712,aes(x=lon,y=lat, shape=as.factor(hypox), color=as.factor(hypox), fill = as.factor(hypox), alpha = 0.1),size=1.6)+
+    scale_shape_manual(values = c(21,21))+
+    scale_color_manual(values=c("black",'black'))+
+    scale_fill_manual(values=c("#66CCEE", "#228833"))+
+  theme(panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "Gray75"),
+      axis.title = element_blank())
+
+
+
+
+#This map is a potential for hypoxia. We do not look at whether or not the prediction is in agreement with the actual data as the NLA methodology was not made for shallow lakes
+{
+  ggplot(rf.hypox.shallow,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_map("conic", lat0 = 30)+
+    geom_point(data=rf.hypox.shallow,aes(x=lon,y=lat, shape=as.factor(Shallow.predict), color=as.factor(Shallow.predict), fill = as.factor(Shallow.predict), alpha = 0.1),size=3)+
+    scale_shape_manual(values = c(21,21))+
+    scale_color_manual(values=c("black",'black'))+
+    scale_fill_manual(values=c("#66CCEE", "#228833"))+
+  theme(panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_blank(),
+          axis.title = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank())
+ggsave("../../../NLA paper/Figures/Fig. S11c-NEW.pdf", width = 10, height = 6)
+}
+
+plot(Shal.BHF0712$hypox ~ Shal.BHF0712$lMeanDepth,
+     xlab = "Mean depth (m)",
+     ylab = "Hypoxia",
+     col = c("#228833","#66CCEE"))
+
+{
+  pdf("../../../NLA paper/Figures/Fig. S5ab-NEW.pdf", width=12)
+  par(mfrow=c(1,2))
+plot(Shallow.predict ~ Shal.BHF0712$lMeanDepth,
+     xlab = "Mean depth (m)",
+     ylab = "Hypoxia",
+     col = c("#228833","#66CCEE") )
+mtext(text = "a", side = 3, line = 0, at = -0.05)
+
+plot(Shallow.predict ~ Shal.BHF0712$elevation_m,
+     xlab = "Altitude (m)",
+     ylab = "",
+     col = c("#228833","#66CCEE") )
+mtext(text = "b", side = 3, line = 0, at = -0.05)
+dev.off()
+}
+
+BF0712$nutrient_color_ax <- as.character(BF0712$nutrient_color)
+BF0712$nutrient_color_ax[BF0712$nutrient_color_ax=="blue"] <- "Oligo"
+BF0712$nutrient_color_ax[BF0712$nutrient_color_ax=="green"] <- "Eutro"
+BF0712$nutrient_color_ax[BF0712$nutrient_color_ax=="brown"] <- "Dystro"
+BF0712$nutrient_color_ax[BF0712$nutrient_color_ax=="murky"] <- "Mixo"
+BF0712$nutrient_color_ax = factor(BF0712$nutrient_color_ax, levels = c("Oligo", "Dystro", "Eutro", "Mixo"))
+
+BHF0712$nutrient_color_ax <- as.character(BHF0712$nutrient_color)
+BHF0712$nutrient_color_ax[BHF0712$nutrient_color_ax=="blue"] <- "Oligo"
+BHF0712$nutrient_color_ax[BHF0712$nutrient_color_ax=="green"] <- "Eutro"
+BHF0712$nutrient_color_ax[BHF0712$nutrient_color_ax=="brown"] <- "Dystro"
+BHF0712$nutrient_color_ax[BHF0712$nutrient_color_ax=="murky"] <- "Mixo"
+BHF0712$nutrient_color_ax = factor(BHF0712$nutrient_color_ax, levels = c("Oligo", "Dystro", "Eutro", "Mixo"))
+
+#Hypolimnion and Hypoxia as a function of Nutrient-Color
+#WITH unconstrained Z MEAN
+{
+pdf("../../../NLA paper/Figures/Fig. 5-NEW.pdf", width=13)
+par(mfrow=c(1,2))
+plot(BF0712$Binhypo ~ BF0712$nutrient_color_ax,
+     las = 1,
+     xlab = "Nutrient color",# (n = 1128)
+     ylab = "Hypolimion",
+     col = c("#4477AA","#66CCEE"),
+     xaxt = "n")
+mtext(text = "a", side = 3, line = 0, at = -0.05)
+
+plot(BHF0712$hypox ~ BHF0712$nutrient_color_ax,
+        xlab = "Nutrient color", # (n = 500)
+        ylab = "Hypoxia",
+        las = 1,
+     col = c("#228833","#66CCEE"),
+     main = "")
+mtext(text = "b", side = 3, line = 0, at = -0.05)
+dev.off()
+}
+
+
+#WITH Constrained Z MEAN
+# {
+# pdf("../../../NLA paper/Figures/Fig. 5-NEW.pdf", width=13)
+# par(mfrow=c(1,2))
+# plot(BF0712$Binhypo[BF0712$lMeanDepth<13.5] ~ BF0712$nutrient_color_ax[BF0712$lMeanDepth<13.5],
+#      las = 1,
+#      xlab = "Nutrient color",# (n = 1128)
+#      ylab = "Hypolimion",
+#      col = c("#4477AA","#66CCEE"),
+#      xaxt = "n")
+# mtext(text = "a", side = 3, line = 0, at = -0.05)
+# 
+# plot(BHF0712$hypox[BHF0712$lMeanDepth<11.8] ~ BHF0712$nutrient_color_ax[BHF0712$lMeanDepth<11.8],
+#         xlab = "Nutrient color", # (n = 500)
+#         ylab = "Hypoxia",
+#         las = 1,
+#      col = c("#228833","#66CCEE"),
+#      main = "")
+# mtext(text = "b", side = 3, line = 0, at = -0.05)
+# dev.off()
+# }
+
+#Compared with the increased nutrients sensitivity analysis
+{
+pdf("../../../NLA paper/Figures/Fig. S7.V2.pdf", width=13)
+plot(BHF0712$hypox ~ BHF0712$nutrient_color_ax,
+        xlab = "Nutrient-color", # (n = 500)
+        ylab = "Hypoxic state",
+        las = 1,
+     col = c("#228833","#66CCEE"),
+     main = "")
+par(new=T)
+plot(as.factor(output.temp[,26])~BHF0712$nutrient_color_ax,
+     xlab = "",
+     ylab = "",
+     axes = FALSE,
+     col = makeTransparent(c("#228833","#66CCEE")))
+dev.off()
+}
+
+
+
+#####################################################################################
+############################Hypoxia in non-ypolimnion lakes##########################
+#####################################################################################
+
+metadata.NoHypo07 = cbind(metadata.NoHypo07,  hypox=NoHypo.hypox07)#, RelO2=RelO207 SedVarNoHypo07,
+metadata.NoHypo12 = cbind(metadata.NoHypo12, hypox=NoHypo.hypox12)#, RelO2=RelO212 SedVarNoHypo12, 
+
+metadata.NoHypo0712 = rbind(metadata.NoHypo07, metadata.NoHypo12)
+
+metadata.NoHypo0712$MaxLength = MaxL.0712[match(metadata.NoHypo0712$site_id,MaxL.0712$site_id),2]
+
+BHpred.nohypo = c("lat", "lon","area_km2", "elevation_m", "basinarea_km2", "chla_ugL", "NTL_umolL", "PTL_umolL", "DOC_umolL", "secchi_m", "color_PCU","WALA_ratio", "pct_forest", "pct_agric",  "nutrient_color",  "MaxLength", "lMeanDepth","lShorelineDevelopment", "Julian.day", "hypox", "deltaT_C","surfT_C", "deepT_C")
+
+MF.nohypo0712 <- missForest(metadata.NoHypo0712[,-c(1,2,3,9,10,11,12,13,14,34,35,36,38,40,66)])
+MF.nohypo0712 = MF.nohypo0712$ximp
+
+MF.nohypo0712$site_id = metadata.NoHypo0712$site_id
+MF.nohypo0712$nutrient_color = metadata.NoHypo0712$nutrient_color
+MF.nohypo0712$cond_uScm = metadata.NoHypo0712$cond_uScm
+
+# HT0712$Transparency = HT0712$secchi_m / HT0712$depthmax_m*100
+MF.nohypo0712$NTL_umolL = MF.nohypo0712$NTL_ugL/14.0067 #Transform into umol
+MF.nohypo0712$PTL_umolL = MF.nohypo0712$PTL_ugL/30.973762 #Transform into umol
+MF.nohypo0712$DOC_umolL = MF.nohypo0712$DOC_mgL/12.0107*1000
+MF.nohypo0712$WALA_ratio = MF.nohypo0712$basinarea_km2/MF.nohypo0712$area_km2
+
+#Remove some lakes that are problematic (saline or half/no profiles)
+#Half/no profiles
+MF.nohypo0712 <- MF.nohypo0712[-which(MF.nohypo0712$site_id %in% c("NLA06608-1037", "NLA12_SD-130", "NLA12_WI-R13 ")),]
+
+#Saline
+MF.nohypo0712 <- MF.nohypo0712[-which(MF.nohypo0712$site_id %in% c("NLA12_IN-131", "NLA12_IN-174", "NLA12_NM-129", "NLA12_NM-162")),]
+MF.nohypo0712 <- MF.nohypo0712[MF.nohypo0712$cond_uScm<1000,]
+
+#Specific to a single year
+MF.nohypo0712 <- MF.nohypo0712[-which(MF.nohypo0712$site_id %in% c("NLA06608-1435", "NLA06608-1782","NLA06608-2800") & MF.nohypo0712$year==2007),]
+MF.nohypo0712 <- MF.nohypo0712[-which(MF.nohypo0712$site_id %in% c("NLA06608-1375", "NLA06608-R5_KATHRYN", "NLA06608-1403", "NLA06608-2640", "NLA06608-2824") & MF.nohypo0712$year==2012),]
+
+
+
+BHF0712.nohypo = MF.nohypo0712[,BHpred.nohypo] #BinHypoxForest BAF
+BHF0712.nohypo$DSR = sqrt(BHF0712.nohypo$area_km2)/BHF0712.nohypo$lMeanDepth
+
+#Manually fill nutrient_color group for 1 lake that was NA
+BHF0712.nohypo[582,15] = "brown"
+
+
+control <- trainControl(method='repeatedcv',
+                        number=10,
+                        repeats=3,
+                        search='grid')
+#create tunegrid with 15 values from 1:15 for mtry to tunning model. Our train function will #change number of entry variable at each split according to tunegrid.
+tunegrid <- expand.grid(.mtry = (1:20))
+#Random generate 15 mtry values with tuneLength = 15
+set.seed(101)
+
+rf_gridsearch.hypox.nohypo <- caret::train(hypox ~.,
+                                    data = BHF0712.nohypo[,-c(22,23)],
+                                    method = "rf",
+                                    metric = "Accuracy",
+                                    tuneGrid = tunegrid,
+                                    trControl = control)
+
+pdf("../../../NLA paper/Figures/Fig. 6.pdf")
+plot(varImp(rf_gridsearch.hypox.nohypo), main = "Hypoxia (presence/absence)")
+dev.off()
+
+plot(BHF0712.nohypo$hypox~log(BHF0712.nohypo$DSR))
+
+{
+pdf("../../../NLA paper/Figures/Fig. S9.V2.pdf", width=13)
+  par(mfrow=c(1,2))
+  plot(BHF0712.nohypo$hypox ~ BHF0712.nohypo$deltaT_C,
+        xlab = expression(paste(Delta*"T (",degree,"C)")), # (n = 500)
+        ylab = "Hypoxic state",
+        las = 1,
+     col = c("#228833","#66CCEE"),
+     main = "")
+  
+plot(BHF0712.nohypo$hypox ~ BHF0712.nohypo$deepT_C,
+        xlab = "Bottom temperature (°C)", # (n = 500)
+        ylab = "Hypoxic state",
+        las = 1,
+     col = c("#228833","#66CCEE"),
+     main = "")
+}
+
+#Assign RF value based on votes
+RF.classif.nohypo <- rf_gridsearch.hypox.nohypo$finalModel$predicted
+Obs.classif.nohypo <- MF.nohypo0712$hypox
+pch.code <- ifelse(RF.classif.nohypo==Obs.classif.nohypo, 1, 0)
+
+RF.classif.nohypo.test <- as.character(RF.classif.nohypo)
+RF.classif.nohypo.test[RF.classif.nohypo.test =="0"]="2"
+RF.classif.nohypo.test = as.factor(RF.classif.nohypo.test)
+Obs.classif.nohypo.test <- as.character(Obs.classif.nohypo)
+Obs.classif.nohypo.test[Obs.classif.nohypo.test =="0"]="2"
+Obs.classif.nohypo.test = as.factor(Obs.classif.nohypo.test)
+
+confusionMatrix(RF.classif.nohypo.test ,Obs.classif.nohypo.test,mode = "prec_recall")
+# Accuracy : 0.83
+# Precision : 0.84
+# Recall : 0.75
+# F1 : 0.79
+
+#Store which lakes are predicted to be hypoxic but are not
+Confusion01.hypox.nohypo <- data.frame(Lake_ID=MF.nohypo0712[RF.classif.nohypo==1 & Obs.classif.nohypo==0,"site_id"],Potential=rep(NA,61))
+#In second column, store if the lake could become hypoxic given DOY and O2mg/L (done manually)
+Confusion01.hypox.nohypo[,2] <- c(1,0,1,0,1,1,1,1,1,0,1,1,1,1,1,1,0,0,0,1,0,0,0,1,0,0,1,1,1,0,0,0,0,0,1,1,1,1,0,0,1,0,0,0,0,1,0,1,0,0,0,1,1,0,0,0,0,0) #46.6%% likely that "not hypoxic" will be hypoxic during the season
+#23/58 likely polymictic (39.7%)
+
+#                 Lake_ID Potential
+# 1         NLA06608-0004        1 (was almost hypoxic, but 2nd visit is 6mg/L, maybe short season or polymictic)
+# 2         NLA06608-0127        0 (likely polymictic)
+# 2         NLA06608-0158        1 (almost hypoxic)
+# 3         NLA06608-0399        0 (likely polymictic)
+# 4         NLA06608-0421        1 (almost hypoxic, but likely polymictic)
+####### 4         NLA06608-0463        0
+# 5         NLA06608-0479        1 (almost hypoxic, but likely polymictic)
+# 6         NLA06608-0533        1 (almost hypoxic)
+# 6         NLA06608-0547        1 (almost hypoxic, but likely polymictic)
+####### 8         NLA06608-0590        1 (almost hypoxic)
+# 8         NLA06608-0659        1 (4.7mg/L on 06/26)
+# 7         NLA06608-0679        1 (highly hypoxic in 2012)
+# 9         NLA06608-0764        0
+# 8         NLA06608-0781        1 (almost hypoxic, but likely polymictic)
+# 9         NLA06608-0860        1 (almost hypoxic, but likely polymictic)
+# 10        NLA06608-0875        1 (almost hypoxic, but likely polymictic)
+# 14        NLA06608-0957        1 (at 3.18 mg/L on 06/21)
+####### 11        NLA06608-0979        1 (hypoxic on 2nd visit)
+####### 12        NLA06608-1037        NA (no profile)
+# 13        NLA06608-1083        1 (almost hypoxic, but likely polymictic)
+# 14        NLA06608-1208        1 (hypoxic on 2nd visit)
+# 15        NLA06608-1227        0 (maybe but 0 to be conservative)
+# 16        NLA06608-1281        0 (high potential for anoxic sediments with deep chl max)
+# 17        NLA06608-1365        0
+# 18        NLA06608-1383        1 (hypoxic in 2012)
+# 19        NLA06608-1401        0 (likely polymictic)
+# 21        NLA06608-1487        0 (hypoxic in 2012, polymictic in 2007)
+####### 23        NLA06608-1544        0 (likely polymictic)
+# 22        NLA06608-1561        0 (maybe, but conservastive)
+25        NLA06608-1600        NA
+# 24        NLA06608-1793        1 (likely polymictic, entirely anoxic in 2012)
+# 24        NLA06608-1802        0
+# 25        NLA06608-2078        0
+# 27        NLA06608-2087        1 (almost hypoxic, but likley polymictic)
+# 26        NLA06608-2332        1 (hypoxic in 2012)
+# 27        NLA06608-2740        1 (hypoxic in 2012)
+####### 30 NLA06608-ELS_1D1-035        0 (likely polymictic)
+# 28 NLA06608-ELS_1E1-096        0 (likely polymictic)
+33 NLA06608-EMAP_ME263L        NA
+# 29  NLA06608-MN_74-0023        0 (homogeneous t_c on 7.5m deep)
+# 30    NLA06608-R10ULAKE        0 (likely polymictic)
+####### 34       NLA06608-R7106        0 (likely polymictic)
+# 31        NLA06608-0234        1 (hypoxic in 2007)
+# 32        NLA06608-0303        1 (hypoxic in 2007)
+# 28        NLA06608-0529        1 (hypoxic in 2007, likely polymictic, whole lake homogeneous)
+# 33        NLA06608-0610        1 (hypoxic in 2007)
+# 34        NLA06608-0805        0
+# 36        NLA06608-1434        0
+# 37        NLA06608-1824        1 (hypoxic in 2007)
+####### 37        NLA06608-2824        NA
+# 40         NLA12_CA-141        0
+# 41         NLA12_CO-127        0 (likely polymictic)
+# 43         NLA12_IN-179        0
+# 44         NLA12_IN-193        0 (likely polymictic, whole homogeneous lake)
+# 45         NLA12_KS-109        1 (hypoxic on 2nd visit)
+# 46         NLA12_MI-142        0
+# 47         NLA12_MN-138        1 (almost hypoxic, but likely polymictic)
+####### 44         NLA12_ND-115        1 (hypoxic 2nd visit)
+# 45         NLA12_NE-158        0
+# 49         NLA12_OH-113        0
+# 50         NLA12_PA-118        0
+# 51         NLA12_PA-R11        1 (almost hypoxic)
+####### 53         NLA12_WA-R10        0
+54         NLA12_WA-125        NA
+55         NLA12_WA-141        NA
+####### 50         NLA12_WI-131        1 (almost hypoxic)
+# 54         NLA12_WI-136        0
+# 55         NLA12_WI-142        0
+# 56         NLA12_WI-157        0
+# 57         NLA12_WI-179        0
+# 58         NLA12_WI-R12        0
+61         NLA12_WI-R13        NA
+
+
+
+
+
+#Create df
+rf.hypox.nohypo = data.frame(lon = BHF0712.nohypo$lon,
+                     lat = BHF0712.nohypo$lat,
+                     RF.classif.nohypo,
+                     pch.code)
+#Create map
+#Observed Hypoxia
+ggplot(rf.hypox.nohypo,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_fixed(1.3)+
+    geom_point(data=BHF0712.nohypo,aes(x=lon,y=lat, shape=as.factor(hypox), color=as.factor(hypox), fill = as.factor(hypox), alpha = 0.1),size=1.6)+
+    scale_shape_manual(values = c(21,21))+
+    scale_color_manual(values=c("black",'black'))+
+    scale_fill_manual(values=c("#66CCEE", "#228833"))+
+  theme(panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "Gray75"),
+      axis.title = element_blank())
+
+
+#Prediction of hypoxia (not super good). We do not look at whether or not the prediction is in agreement with the actual data as the NLA methodology was not made for shallow lakes
+#Create map
+{
+p3 <- ggplot(rf.hypox.nohypo,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_map("conic", lat0 = 30)+
+    geom_point(data=rf.hypox.nohypo[rf.hypox.nohypo$RF.classif.nohypo==1,],
+               aes(x=lon,
+                   y=lat, 
+                   shape=as.factor(pch.code), 
+                   color=as.factor(RF.classif.nohypo), 
+                   fill = as.factor(RF.classif.nohypo), 
+                   alpha = 0.1),
+               size=2)+
+    scale_shape_manual(values = c(25,21))+
+    scale_color_manual(values=c("black",'black'))+
+    scale_fill_manual(values=c("#66CCEE", "#228833")[2])+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_blank(),
+          axis.title = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank())
+
+p4 <- ggplot(rf.hypox.nohypo,aes(x=lon,y=lat))+
+    geom_polygon(data = usa, aes(x=long, y = lat, group = group),fill="grey80")+
+    coord_map("conic", lat0 = 30)+
+    geom_point(data=rf.hypox.nohypo[rf.hypox.nohypo$RF.classif.nohypo==0,],
+               aes(x=lon,
+                   y=lat, 
+                   shape=as.factor(pch.code), 
+                   color=as.factor(RF.classif.nohypo), 
+                   fill = as.factor(RF.classif.nohypo), 
+                   alpha = 0.1),
+               size=2)+
+    scale_shape_manual(values = c(25,21))+
+    scale_color_manual(values=c("black",'black'))+
+    scale_fill_manual(values=c("#66CCEE", "#228833")[1])+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_blank(),
+          axis.title = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_blank())
+grid.arrange(p3, p4, nrow = 2)
+ggsave("../../../NLA paper/Figures/Fig. HypoxNoHypo.pdf", plot = grid.arrange(p1, p2, nrow = 2), width = 10, height = 6)
+}
+
+
+
+#Single tree
+hypox.tree.nohypo = caret::train(hypox ~ ., 
+                  data=BHF0712.nohypo, 
+                  method="rpart", 
+                  trControl = control)
+
+
+tree.classif.hypox.nohypo <- as.data.frame(predict(hypox.tree.nohypo$finalModel))
+tree.classif.hypox.nohypo[,3] = 1
+tree.classif.hypox.nohypo[tree.classif.hypox.nohypo[,2]<0.5,3] = 0
+
+tree.classif.hypox.test.nohypo <- as.character(tree.classif.hypox.nohypo[,3])
+tree.classif.hypox.test.nohypo[tree.classif.hypox.test.nohypo =="0"]="2"
+tree.classif.hypox.test.nohypo = as.factor(tree.classif.hypox.test.nohypo)
+Obs.classif.hypox.test.nohypo <- as.character(BHF0712.nohypo$hypox)
+Obs.classif.hypox.test.nohypo[Obs.classif.hypox.test.nohypo =="0"]="2"
+Obs.classif.hypox.test.nohypo = as.factor(Obs.classif.hypox.test.nohypo)
+
+confusionMatrix(as.factor(tree.classif.hypox.test.nohypo),Obs.classif.hypox.test.nohypo,mode = "prec_recall")
+
+# Accuracy : 0.81
+# Precision : 0.86
+# Recall : 0.68
+# F1 : 0.76
+
+
+pdf("../../../NLA paper/Hypolimnion Tree.V2.pdf")
+fancyRpartPlot(hypox.tree.nohypo$finalModel)
+dev.off()
+
+pdf("../../../NLA paper/Figures/Fig.S9.pdf", width = 8, height = 5)
+par(mfrow=c(1,2))
+plot(BHF0712.nohypo$hypox ~ BHF0712.nohypo$elevation_m,
+     ylab = "Hypolimnion",
+     xlab = "Altitude (m)",
+     las = 1,
+     col = c("#228833","#66CCEE"))
+
+plot(BHF0712.nohypo$hypox ~ log(BHF0712.nohypo$DSR),
+     ylab = "Hypoxia",
+     xlab = "Lake dynamic sediment ratio (log values)",
+     las = 1,
+     col = c("#228833","#66CCEE"))
+dev.off()
+
+###############################################################################################
+############################Plots for response to reviewers####################################
+###############################################################################################
+
+#Color and DOC
+jpeg("../../../NLA paper/Figures/Color-DOC.jpeg")
+par(mfrow=c(1,1))
+
+plot(Bin0712$color_PCU~Bin0712$DOC_umolL,
+     ylab = "Color (PCU)",
+     xlab = expression(DOC~(mu*mol~L^-1)),
+     main = "Deep lakes", 
+     las=1)
+
+# plot(BHF0712$color_PCU~BHF0712$DOC_umolL,
+#      ylab = "Color (PCU)",
+#      xlab = expression(DOC~(mu*mol~L^-1)),
+#      main = "Deep lakes with a hypolimnion",
+#      las=1)
+# 
+# plot(BHF0712.shal$color_PCU~BHF0712.shal$DOC_umolL,
+#      ylab = "Color (PCU)",
+#      xlab = expression(DOC~(mu*mol~L^-1)),
+#      main = "Deep lakes with a hypolimnion",
+#      las=1)
+
+dev.off()
+
+
+
+
+
+
+
+#Hypoxia in lakes less than 5m deep
+# Meta.5m = rbind(BHF0712.back[BHF0712.back$lMeanDepth <=5, -c(21,23)], Shal.BHF0712[,-22])
+# 
+# Meta.5m.rf_gridsearch.hypox <- caret::train(hypox ~.,
+#                        data = Meta.5m,
+#                        method = "rf",
+#                        metric = "Accuracy",
+#                        tuneGrid = tunegrid,
+#                         trControl = control)
+# 
+# plot(varImp(Meta.5m.rf_gridsearch.hypox), main = "Hypoxia (presence/absence)")
+# 
+# Meta.5m.predict = Meta.5m.rf_gridsearch.hypox$finalModel$predicted
+# Meta.5m.hypox <-Meta.5m$hypox
+# 
+# confusionMatrix(Meta.5m.predict,Meta.5m.hypox)
+# plot(Meta.5m.predict ~ Meta.5m$lMeanDepth)
+# 
+# #With Lasso regression
+# set.seed(101)
+# train0712 = sample(1:nrow(Meta.5m), 0.7*nrow(Meta.5m))
+# test0712 = which(!1:nrow(Meta.5m) %in% train0712)
+# 
+# Meta.5m.lasso = Meta.5m
+# Meta.5m.lasso[,21] = as.numeric(Meta.5m.lasso[,21])-1
+# Meta.5m.lasso = cbind(scale(Meta.5m.lasso[,-c(15,18,21)]),Meta.5m.lasso[,c(15,18,21)])
+# 
+# traindata = Meta.5m.lasso[train0712,]
+# testdata = Meta.5m.lasso[test0712,]
+# # traindata[,22] = as.numeric(traindata[,22])-1
+# # testdata[,22] = as.numeric(testdata[,22])-1
+# 
+# x <- model.matrix(hypox~., traindata)[,-1]
+# y = as.numeric(traindata$hypox)-1
+# cv.lasso <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+# model <- glmnet(x, y, alpha = 1, family = "binomial",
+#                 lambda = cv.lasso$lambda.min)
+# coef(model)
+# 
+# x.test <- model.matrix(hypox ~., testdata)[,-1]
+# probabilities <- model %>% predict(newx = x.test)
+# predicted.classes <- as.factor(ifelse(probabilities > 0.5, "1", "0"))
+# observed.classes <- as.factor(testdata$hypox)
+# mean(predicted.classes == observed.classes) #0.8482
+# confusionMatrix(predicted.classes, observed.classes)
+# plot(cv.lasso)
+# 
+# 
+# lasso.model <- glmnet(x, y, alpha = 1, family = "binomial",
+#                       lambda = cv.lasso$lambda.min)
+# x.test <- model.matrix(hypox ~., testdata)[,-1]
+# probabilities <- lasso.model %>% predict(newx = x.test)
+# predicted.classes <- as.factor(ifelse(probabilities > 0.5, "1", "0"))
+# # Model accuracy
+# observed.classes <- as.factor(testdata$hypox)
+# mean(predicted.classes == observed.classes)
+# confusionMatrix(predicted.classes, observed.classes)
+# coef(lasso.model)
+# 
+# # Final model with lambda.1se
+# lasso.model <- glmnet(x, y, alpha = 1, family = "binomial",
+#                       lambda = cv.lasso$lambda.1se)
+# # Make prediction on test data
+# x.test <- model.matrix(hypox ~., testdata)[,-1]
+# probabilities <- lasso.model %>% predict(newx = x.test)
+# predicted.classes <- as.factor(ifelse(probabilities > 0.5, "1", "0"))
+# # Model accuracy rate
+# observed.classes <- as.factor(testdata$hypox)
+# mean(predicted.classes == observed.classes) #0.82
+# confusionMatrix(predicted.classes, observed.classes)
+# coef(lasso.model)
+# plot(predicted.classes ~ testdata$lMeanDepth)
+######################Rel Anox#####################
+
+# 
+# RA0712 = rbind(HT07, HT12[-75,]) #75 est le lac défectueux
+# RA0712 = cbind(RA0712,RAnox0712)
+# 
+# RApred = c("lat", "lon","area_km2", "elevation_m", "basinarea_km2", "chla_ugL", "NTL_umolL", "PTL_umolL", "DOC_umolL", "secchi_m", "color_PCU","WALA_ratio", "pct_forest", "pct_agric",  "nutrient_color", "Transparency", "lMeanDepth","lMinorAxisLength", "lFetch", "depthmax_m","Julian.day", "RAnox0712")
+# 
+# RAF0712 = RA0712[,RApred]
+# 
+# 
+# set.seed(101)
+# #Train and test datasets
+# train0712 = sample(1:nrow(RAF0712), 0.6*nrow(RAF0712))
+# test0712 = which(!1:nrow(RAF0712) %in% train0712)
+# 
+# #Create output matrix and name columns
+# # out.mat = matrix(nrow = ncol(RAF0712))
+# # rownames(out.mat) = c("All", colnames(RAF0712)[-length(colnames(RAF0712))])
+# 
+# #Random Forest on all variables
+# rf.RAF0712 = randomForest(RAnox0712~., data=RAF0712, subset = train0712, localImp = TRUE)
+# rf.RAFt0712 = predict(rf.RAF0712, newdata = RAF0712[test0712,])
+# # out.mat[1,1] = mean(abs(RAF0712[test0712,"RAnox0712"] - rf.RAFt0712))
+# # for(i in 1:(dim(RAF0712)[2]-1))
+# # {
+# #   RAF0712.temp = RAF0712[,-i]
+# #   rf.RAF0712 = randomForest(RAnox0712~., data=RAF0712.temp, subset = train0712)
+# #   rf.RAFt0712 = predict(rf.RAF0712, newdata = RAF0712.temp[test0712,])
+# #   out.mat[i+1,1] = mean(abs(RAF0712.temp[test0712,"RAnox0712"] - rf.RAFt0712))
+# # }
+# # as.matrix(out.mat[order(out.mat, decreasing = T),])
+# 
+# summary(lm(rf.RAFt0712 ~ RAF0712[test0712,"RAnox0712"]))
+# plot(rf.RAFt0712 ~ RAF0712[test0712,"RAnox0712"],
+#      xlab = expression(Relative~anoxia~volume),
+#      # xlim = c(-4,4),
+#      # ylim = c(-2,3),
+#      ylab = expression(Predicted~relative~anoxia~volume),
+#      las = 1)
+# rtparty.HT0712 = ctree(RAnox0712 ~ ., data=RAF0712[test0712,], controls=cforest_control(mtry=NULL, mincriterion=3))
+# #pdf("../output/tree0712.pdf", width = 30, height = 15)
+# plot(rtparty.HT0712)
+# # explain_forest(rf.RAF0712, interactions = TRUE, data = RAF0712[test0712,])
+
+####################################Hypoxie############################
+
+RH07.merge = HT0712[HT0712$year==2007,]
+RH12.merge = HT0712[HT0712$year==2012,]
+
+RH07 = merge(RH07.merge, RHypox07, by = "site_id")
+RH12 = merge(RH12.merge, RHypox12, by = "site_id")
+colnames(RH07)[73] = "RHypox0712"
+colnames(RH12)[73] = "RHypox0712"
+
+RH0712 = rbind(RH07, RH12)
+
+
+RHpred = c("lat", "lon","area_km2", "elevation_m", "basinarea_km2", "chla_ugL", "NTL_umolL", "PTL_umolL", "DOC_umolL", "secchi_m", "color_PCU","WALA_ratio", "pct_forest", "pct_agric",  "nutrient_color", "Transparency", "MaxLength", "lMeanDepth","lShorelineDevelopment","Julian.day", "DRhypo" , "RHypox0712")#lMinorAxisLength", "lFetch, "depthmax_m"
+
+RHF0712 = RH0712[,RHpred]
+RHF0712$DSR = sqrt(RHF0712$area_km2)/RHF0712$lMeanDepth
+#TEMPORARY FIX
+RHF0712$WALA_ratio[457] = RHF0712$WALA_ratio[457]/1000
+RHF0712$basinarea_km2[457] = RHF0712$basinarea_km2[457]/1000
+
+
+set.seed(101)
+#Train and test datasets
+train0712 = sample(1:nrow(RHF0712), 0.6*nrow(RHF0712))
+test0712 = which(!1:nrow(RHF0712) %in% train0712)
+
+#Random Forest on all variables
+rf.RHF0712 = randomForest(RHypox0712~., data=RHF0712, subset = train0712, localImp = T,ntree = 1000)
+rf.RHFt0712 = predict(rf.RHF0712, newdata = RHF0712[test0712,])
+
+summary(lm(rf.RHFt0712 ~ RHF0712[test0712,"RHypox0712"]))
+RHF0712.col = as.character(RHF0712[test0712,"nutrient_color"])
+RHF0712.col[RHF0712.col=="murky"] = "black"
+plot(rf.RHFt0712 ~ RHF0712[test0712,"RHypox0712"],
+     xlab = expression(Relative~hypoxia~volume),
+     # xlim = c(-4,4),
+     # ylim = c(-2,3),
+     ylab = expression(Predicted~relative~hypoxia~volume),
+     las = 1,
+     col = RHF0712.col,
+     pch = 16)
+rtparty.HT0712 = ctree(RHypox0712 ~ ., data=RHF0712[test0712,], controls=cforest_control(mtry=NULL, mincriterion=3))
+#pdf("../output/tree0712.pdf", width = 30, height = 15)
+plot(rtparty.HT0712)
+
+# explain_forest(rf.RHF0712, interactions = TRUE, data = RHF0712)
+
+
+#######################Rel Anoxia w/o "zeros"################
+
+# RAposF0712 = RAF0712[RAF0712$RAnox0712>0,]
+# 
+# set.seed(101)
+# #Train and test datasets
+# train0712 = sample(1:nrow(RAposF0712), 0.6*nrow(RAposF0712))
+# test0712 = which(!1:nrow(RAposF0712) %in% train0712)
+# 
+# #Create output matrix and name columns
+# #out.mat = matrix(nrow = ncol(RAposF0712))
+# #rownames(out.mat) = c("All", colnames(RAposF0712)[-length(colnames(RAposF0712))])
+# 
+# #Random Forest on all variables
+# rf.RAposF0712 = randomForest(RAnox0712~., data=RAposF0712, subset = train0712, localImp = TRUE)
+# rf.RAposFt0712 = predict(rf.RAposF0712, newdata = RAposF0712[test0712,])
+# # out.mat[1,1] = mean(abs(RAposF0712[test0712,"RAnox0712"] - rf.RAposFt0712))
+# # for(i in 1:(dim(RAposF0712)[2]-1))
+# # {
+# #   RAposF0712.temp = RAposF0712[,-i]
+# #   rf.RAposF0712 = randomForest(RAnox0712~., data=RAposF0712.temp, subset = train0712)
+# #   rf.RAposFt0712 = predict(rf.RAposF0712, newdata = RAposF0712.temp[test0712,])
+# #   out.mat[i+1,1] = mean(abs(RAposF0712.temp[test0712,"RAnox0712"] - rf.RAposFt0712))
+# # }
+# # as.matrix(out.mat[order(out.mat, decreasing = T),])
+# 
+# summary(lm(rf.RAposFt0712 ~ RAposF0712[test0712,"RAnox0712"]))
+# plot(rf.RAposFt0712 ~ RAposF0712[test0712,"RAnox0712"],
+#      xlab = expression(Relative~anoxia~volume),
+#      # xlim = c(-4,4),
+#      # ylim = c(-2,3),
+#      ylab = expression(Predicted~relative~anoxia~volume),
+#      las = 1)
+# rtparty.HT0712 = ctree(RAnox0712 ~ ., data=RAposF0712[test0712,], controls=cforest_control(mtry=NULL, mincriterion=3))
+# #pdf("../output/tree0712.pdf", width = 30, height = 15)
+# plot(rtparty.HT0712)
+# explain_forest(rf.RAposF0712, interactions = TRUE, data = RAposF0712[test0712,])
+
+#######################Rel Hypoxia w/o "zeros"################
+RHpospred = c("lat", "lon","area_km2", "elevation_m", "basinarea_km2", "chla_ugL", "NTL_umolL", "PTL_umolL", "DOC_umolL", "secchi_m", "color_PCU","WALA_ratio", "MaxLength", "pct_forest", "pct_agric",  "nutrient_color", "lMeanDepth","lShorelineDevelopment","Julian.day","DRhypo" , "RHypox0712")#lMinorAxisLength", "lFetch, "depthmax_m"
+
+RHposF0712 = RH0712[,RHpospred]
+
+RHposF0712 = RHposF0712[RHposF0712$RHypox0712>0,]
+RHposF0712$DSR = sqrt(RHposF0712$area_km2)/RHposF0712$lMeanDepth
+RHposF0712$WALA_ratio[291] = RHposF0712$WALA_ratio[291]/1000
+RHposF0712$basinarea_km2[291] = RHposF0712$basinarea_km2[291]/1000
+
+set.seed(101)
+#Train and test datasets
+train0712 = sample(1:nrow(RHposF0712), 0.6*nrow(RHposF0712))
+test0712 = which(!1:nrow(RHposF0712) %in% train0712)
+
+
+#Random Forest on all variables
+rf.RHposF0712 = randomForest(RHypox0712~., data=RHposF0712, subset = train0712, localImp = TRUE,ntree = 1000)
+rf.RHposFt0712 = predict(rf.RHposF0712, newdata = RHposF0712[test0712,])
+
+RHposF0712.col = as.character(RHposF0712[test0712,"nutrient_color"])
+RHposF0712.col[RHposF0712.col=="murky"] = "black"
+
+summary(lm(rf.RHposFt0712 ~ RHposF0712[test0712,"RHypox0712"]))
+plot(rf.RHposFt0712 ~ RHposF0712[test0712,"RHypox0712"],
+     xlab = expression(Relative~Hypoxic~volume),
+     # xlim = c(-4,4),
+     # ylim = c(-2,3),
+     ylab = expression(Predicted~relative~Hypoxic~volume),
+     las = 1,
+     col = RHposF0712.col,
+     pch =16)
+rtparty.HT0712 = ctree(RHypox0712 ~ ., data=RHposF0712[test0712,], controls=cforest_control(mtry=NULL, mincriterion=3))
+#pdf("../output/tree0712.pdf", width = 30, height = 15)
+plot(rtparty.HT0712)
+explain_forest(rf.RHposF0712, interactions = TRUE, data = RHposF0712[test0712,])
+
+#With caret
+rf_gridsearch.relhypox <- caret::train(RHypox0712 ~.,
+                       data = RHposF0712,
+                       method = "rf",
+                       metric = "RMSE",
+                       tuneGrid = tunegrid,
+                        trControl = control)
+
+relhypox.pred = predict(rf_gridsearch.relhypox, RHposF0712[,-21])
+plot(relhypox.pred ~ RHposF0712$RHypox0712)
+plot(varImp(rf_gridsearch.relhypox), main = "Hypoxia (relative volume)")
+
+
+
+#Create de subdataset 
+trainTask_RHp <- makeRegrTask(data = RHposF0712[train0712,], target = "RHypox0712")
+testTask_RHp <- makeRegrTask(data = RHposF0712[test0712,], target = "RHypox0712")
+#Create the Learner
+learnerRF_RHp <- makeLearner("regr.cforest", predict.type = "response",ntree=999)
+learnerBART_RHp <- makeLearner("regr.bartMachine", predict.type = "response")
+
+# Create the models
+modelRF_RHp <- mlr::train(learnerRF_RHp, task = trainTask_RHp)
+modelBART_RHp <- mlr::train(learnerBART_RHp, task = trainTask_RHp)
+
+#Validate
+rRF_RHp=crossval(learnerRF_RHp, testTask_RHp, iters = 2L)
+rBART_RHp=crossval(learnerBART_RHp, testTask_RHp, iters = 2L)
+
+#Create prediction vectors
+predRF_RHp = predict(modelRF_RHp, newdata = RHposF0712[test0712,])
+predBART_RHp = predict(modelBART_RHp, newdata = RHposF0712[test0712,])
+
+predENS_RHp = (predRF_RHp$data$response+predBART_RHp$data$response)/2
+
+HypoThick.col = as.character(RHposF0712[test0712,"nutrient_color"])
+HypoThick.col[HypoThick.col=="murky"] = "black"
+par(mfrow=c(1,3))
+plot(predRF_RHp$data$response~ RHposF0712[test0712,"RHypox0712"],
+      xlab = expression(Relative~hypoxia),
+     ylab = expression(Predicted~Relative~hypoxia),
+     las = 1,
+     pch = 16,
+     col = HypoThick.col,
+     main = "cforest")
+plot(predBART_RHp$data$response~ RHposF0712[test0712,"RHypox0712"],
+      xlab = expression(Relative~hypoxia),
+     ylab = expression(Predicted~Relative~hypoxia),
+     las = 1,
+     pch = 16,
+     col = HypoThick.col,
+     main = "BART")
+plot(predENS_RHp~ RHposF0712[test0712,"RHypox0712"],
+      xlab = expression(Relative~hypoxia),
+     ylab = expression(Predicted~Relative~hypoxia),
+     las = 1,
+     pch = 16,
+     col = HypoThick.col,
+     main = "Ensemble")
+
+summary(lm(predRF_RHp$data$response~ RHposF0712[test0712,"RHypox0712"]))
+summary(lm(predBART_RHp$data$response~ RHposF0712[test0712,"RHypox0712"]))
+summary(lm(predENS_RHp~ RHposF0712[test0712,"RHypox0712"]))
+
+
+#Multiple regressions
+traindata = RHposF0712[train0712,]
+# traindata[,c(3:12, 17,18,20)] = scale(traindata[,c(3:12, 17,18,20)])
+testdata = RHposF0712[test0712,]
+# testdata[,c(3:12, 17,18,20)] = scale(testdata[,c(3:12, 17,18,20)])
+resp.train = traindata$RHypox0712
+resp.test = testdata$RHypox0712
+
+full.mreg <- lm(resp.train ~., data = traindata[,-21])
+step.mreg <- full.mreg %>% stepAIC(direction = "backward", trace=F)
+
+predicted <- predict(object = full.mreg, newdata = testdata[,-21])
+summary(lm(predicted ~ testdata$RHypox0712))
+plot(predicted ~ testdata$RHypox0712)
+
+probabilities <- step.mreg %>% predict(testdata, type = "response")
+summary(step.mreg)
+
+Okham.mreg <- lm(resp.train ~ elevation_m + secchi_m + color_PCU + WALA_ratio + lMeanDepth + DSR, data = traindata[,-21])
+probabilities <- Okham.mreg %>% predict(testdata, type = "response")
+summary(Okham.mreg)
+
+
+
+# 
+# #########Hypoxic proportion of hypolimnion only
+# RH0712 = rbind(HT07, HT12[-75,]) 
+# RHhypo0712 = cbind(RH0712,RHypox0712hypo)
+# 
+# RHhypopred = c("lat", "lon","area_km2", "elevation_m", "basinarea_km2", "chla_ugL", "NTL_umolL", "PTL_umolL", "DOC_umolL", "secchi_m", "color_PCU","WALA_ratio", "pct_forest", "pct_agric",  "nutrient_color", "Transparency", "lMeanDepth","lShorelineDevelopment", "depthmax_m","Julian.day","DRhypo", "RHypox0712hypo")#lMinorAxisLength", "lFetch
+# 
+# RHhypoF0712 = RHhypo0712[,RHhypopred]
+# 
+# 
+# set.seed(101)
+# #Train and test datasets
+# train0712 = sample(1:nrow(RHhypoF0712), 0.6*nrow(RHhypoF0712))
+# test0712 = which(!1:nrow(RHhypoF0712) %in% train0712)
+# 
+# #Create output matrix and name columns
+# # out.mat = matrix(nrow = ncol(RHF0712))
+# # rownames(out.mat) = c("All", colnames(RHF0712)[-length(colnames(RHF0712))])
+# 
+# #Random Forest on all variables
+# rf.RHhypoF0712 = randomForest(RHypox0712hypo~., data=RHhypoF0712, subset = train0712, localImp = T,
+#                           ntree = 1000)
+# rf.RHhypoFt0712 = predict(rf.RHhypoF0712, newdata = RHhypoF0712[test0712,])
+# # out.mat[1,1] = mean(abs(RHF0712[test0712,"RHypox0712"] - rf.RHFt0712))
+# # for(i in 1:(dim(RHF0712)[2]-1))
+# # {
+# #   RHF0712.temp = RHF0712[,-i]
+# #   rf.RHF0712 = randomForest(RHypox0712~., data=RHF0712.temp, subset = train0712)
+# #   rf.RHFt0712 = predict(rf.RHF0712, newdata = RHF0712.temp[test0712,])
+# #   out.mat[i+1,1] = mean(abs(RHF0712.temp[test0712,"RHypox0712"] - rf.RHFt0712))
+# # }
+# # as.matrix(out.mat[order(out.mat, decreasing = T),])
+# # rf.RHFt0712 = predict(rf.RHF0712, newdata = RHF0712[test0712,])
+# 
+# summary(lm(rf.RHhypoFt0712 ~ RHhypoF0712[test0712,"RHypox0712hypo"]))
+# RHF0712.col = as.character(RHhypoF0712[test0712,"nutrient_color"])
+# RHF0712.col[RHF0712.col=="murky"] = "black"
+# plot(rf.RHhypoFt0712 ~ RHhypoF0712[test0712,"RHypox0712hypo"],
+#      xlab = expression(Relative~hypoxia~volume),
+#      # xlim = c(-4,4),
+#      # ylim = c(-2,3),
+#      ylab = expression(Predicted~relative~hypoxia~volume),
+#      las = 1,
+#      col = RHF0712.col,
+#      pch = 16)
+# rtparty.HT0712hypo = ctree(RHypox0712hypo ~ ., data=RHhypoF0712[test0712,], controls=cforest_control(mtry=NULL, mincriterion=3))
+# #pdf("../output/tree0712.pdf", width = 30, height = 15)
+# plot(rtparty.HT0712hypo)
+# 
+# # explain_forest(rf.RHhypoF0712, interactions = TRUE, data = RHhypoF0712)
+# 
+# 
+# RHpospredhypo = c("lat", "lon","area_km2", "elevation_m", "basinarea_km2", "chla_ugL", "NTL_umolL", "PTL_umolL", "DOC_umolL", "secchi_m", "color_PCU","WALA_ratio", "pct_forest", "pct_agric",  "nutrient_color", "lMeanDepth","lMinorAxisLength", "lFetch", "depthmax_m","Julian.day","DRhypo", "RHypox0712hypo")
+# 
+# RHposF0712hypo = RHhypo0712[,RHpospredhypo]
+# 
+# RHposF0712hypo = RHposF0712hypo[RHposF0712hypo$RHypox0712hypo>0,]
+# RHposF0712hypo$DSR = sqrt(RHposF0712hypo$area_km2)/RHposF0712hypo$lMeanDepth
+# 
+# set.seed(101)
+# #Train and test datasets
+# train0712 = sample(1:nrow(RHposF0712hypo), 0.6*nrow(RHposF0712hypo))
+# test0712 = which(!1:nrow(RHposF0712hypo) %in% train0712)
+# 
+# #Create output matrix and name columns
+# #out.mat = matrix(nrow = ncol(RHposF0712))
+# #rownames(out.mat) = c("All", colnames(RHposF0712)[-length(colnames(RHposF0712))])
+# 
+# #Random Forest on all variables
+# rf.RHposF0712hypo = randomForest(RHypox0712hypo~., data=RHposF0712hypo, subset = train0712, localImp = TRUE, ntree = 1000)
+# rf.RHposFt0712hypo = predict(rf.RHposF0712hypo, newdata = RHposF0712hypo[test0712,])
+# 
+# RHposF0712.col = as.character(RHposF0712[test0712,"nutrient_color"])
+# RHposF0712.col[RHposF0712.col=="murky"] = "black"
+# 
+# summary(lm(rf.RHposFt0712hypo ~ RHposF0712hypo[test0712,"RHypox0712hypo"]))
+# plot(rf.RHposFt0712hypo ~ RHposF0712hypo[test0712,"RHypox0712hypo"],
+#      xlab = expression(Relative~Hypoxia~volume),
+#      # xlim = c(-4,4),
+#      # ylim = c(-2,3),
+#      ylab = expression(Predicted~relative~Hypoxia~volume),
+#      las = 1,
+#      col = RHposF0712.col,
+#      pch =16)
+# rtparty.HT0712hypo = ctree(RHypox0712hypo ~ ., data=RHposF0712hypo[test0712,], controls=cforest_control(mtry=NULL, mincriterion=3))
+# #pdf("../output/tree0712.pdf", width = 30, height = 15)
+# plot(rtparty.HT0712hypo)
+# explain_forest(rf.RHposF0712hypo, interactions = TRUE, data = RHposF0712hypo[test0712,])
+# 
+
+
+
+
+#Random Forest on Leech color
+Lcpred = c("lat", "lon","area_km2", "elevation_m", "basinarea_km2", "chla_ugL", "NTL_ugL", "DOC_mgL", "secchi_m", "WALA_ratio", "pct_forest", "pct_agric",  "nutrient_color", "lMeanDepth","lMinorAxisLength", "lFetch", "depthmax_m","Julian.day")
+
+LcF0712 = TF0712[,Lcpred]
+
+set.seed(101)
+#Train and test datasets
+train0712 = sample(1:nrow(LcF0712), 0.6*nrow(LcF0712))
+test0712 = which(!1:nrow(LcF0712) %in% train0712)
+
+#Random Forest on all variables
+rf.LcF0712 = randomForest(nutrient_color~., data=LcF0712, subset = train0712, localImp = TRUE,
+                             ntree = 1000)
+rf.LcFt0712 = predict(rf.LcF0712, newdata = LcF0712[test0712,])
+
+plot(rf.LcFt0712 ~ LcF0712[test0712,"nutrient_color"],
+     xlab = "Observed",
+     # xlim = c(-4,4),
+     # ylim = c(-2,3),
+     ylab = "Predicted",
+     las = 1)
+rtparty.LcF0712 = ctree(nutrient_color ~ ., data=LcF0712[test0712,], controls=cforest_control(mtry=NULL, mincriterion=3))
+#pdf("../output/tree0712.pdf", width = 30, height = 15)
+plot(rtparty.LcF0712)
+explain_forest(rf.LcF0712, interactions = TRUE, data = LcF0712[test0712,])
+################################BOX PLOTS##########################
+
+plot(BF0712$Binhypo ~ BF0712$nutrient_color,
+        xlab = "Nutrient color",
+        ylab = "",
+        las = 1,
+        main = "Hypolimnion presence/absence")
+
+jpeg("../../../NLA paper/Figures/Fig. S6.V2.jpg", res=600, width=8, height=5, units = "in")
+par(mfrow=c(1,2))
+plot(BF0712$lMeanDepth ~ BF0712$nutrient_color_ax,
+        xlab = "Nutrient-color",
+        ylab = "Mean depth (m)",
+        las = 1,
+        main = "",
+     ylim = c(0,27))
+text(x = c(1,2,3,4), y = 25, labels = c("a", "b", "bc", "c"))
+mtext("a", side = 3, at = 0.2)
+Zmean.NutCol.aov <- aov(BF0712$lMeanDepth ~ BF0712$nutrient_color)
+Zmean.NutCol.aov.Tuk <- TukeyHSD(Zmean.NutCol.aov)
+
+plot(BHF0712$lMeanDepth ~ BHF0712$nutrient_color_ax,
+        xlab = "Nutrient-color",
+        ylab = "Mean depth (m)",
+        las = 1,
+        main = "",
+     ylim = c(0,27))
+text(x = c(1,2,3,4), y = 25, labels = c("a", "b", "b", "b"))
+Zmean.NutCol.aov <- aov(BHF0712$lMeanDepth ~ BHF0712$nutrient_color)
+Zmean.NutCol.aov.Tuk <- TukeyHSD(Zmean.NutCol.aov)
+mtext("b", side = 3, at = 0.2)
+dev.off()
+
+plot(BF0712$DSR ~ BF0712$nutrient_color,
+        xlab = "Nutrient color",
+        ylab = "Dynamic sediment ratio",
+     log = "y",
+        las = 1,
+        main = "")
+# par(mfrow=c(1,2))
+# plot(BF0712$secchi_m ~ BF0712$nutrient_color,
+#         xlab = "Nutrient color",
+#         ylab = "Secchi",
+#      log = "y",
+#         las = 1,
+#         main = "")
+# plot(BF0712$Transparency ~ BF0712$nutrient_color,
+#         xlab = "Nutrient color",
+#         ylab = "Transparency index",
+#      #log = "y",
+#         las = 1,
+#         main = "")
+
+#Secchi ~ Zmax and color
+# par(mfrow =c(2,2))
+# plot(BF0712$secchi_m[BF0712$nutrient_color == "blue"] ~ BF0712$depthmax_m[BF0712$nutrient_color == "blue"],
+#      xlab = "Zmax",
+#      ylab = "Secchi",
+#      log = "xy",
+#      las = 1,
+#      main = "Blue")
+# abline(0,1)
+# 
+# plot(BF0712$secchi_m[BF0712$nutrient_color == "brown"] ~ BF0712$depthmax_m[BF0712$nutrient_color == "brown"],
+#      xlab = "Zmax",
+#      ylab = "Secchi",
+#      log = "xy",
+#      las = 1,
+#      main = "Brown")
+# abline(0,1)
+# 
+# plot(BF0712$secchi_m[BF0712$nutrient_color == "green"] ~ BF0712$depthmax_m[BF0712$nutrient_color == "green"],
+#      xlab = "Zmax",
+#      ylab = "Secchi",
+#      log = "xy",
+#      las = 1,
+#      main = "Green")
+# abline(0,1)
+# 
+# plot(BF0712$secchi_m[BF0712$nutrient_color == "murky"] ~ BF0712$depthmax_m[BF0712$nutrient_color == "murky"],
+#      xlab = "Zmax",
+#      ylab = "Secchi",
+#      log = "xy",
+#      las = 1,
+#      main = "Murky")
+# abline(0,1)
+####
+# plot(BF0712$WALA_ratio ~ BF0712$nutrient_color,
+#         xlab = "Nutrient color",
+#         ylab = "Drainage ratio",
+#      log = "y",
+#         las = 1,
+#         main = "")
+
+#With mean depth
+summary(BF0712$lMeanDepth)#1.3951 -> 2.4549 -> 4.6683 -> 22.9
+par(mfrow=c(2,2))
+plot(BF0712$WALA_ratio[BF0712$lMeanDepth<=1.3951] ~ BF0712$nutrient_color[BF0712$lMeanDepth<=1.3951],
+        xlab = "Nutrient color",
+        ylab = "WALA",
+     ylim = c(1, 500000),
+        las = 1,
+     log = "y",
+        main = "First Zmean quartile")
+plot(BF0712$WALA_ratio[BF0712$lMeanDepth>1.3951 & BF0712$lMeanDepth<=2.4549] ~ BF0712$nutrient_color[BF0712$lMeanDepth>1.3951 & BF0712$lMeanDepth<=2.4549],
+        xlab = "Nutrient color",
+        ylab = "WALA",
+     ylim = c(1, 500000),
+        las = 1,
+     log = "y",
+        main = "Second Zmean quartile")
+plot(BF0712$WALA_ratio[BF0712$lMeanDepth>2.4549 & BF0712$lMeanDepth<=4.6683] ~ BF0712$nutrient_color[BF0712$lMeanDepth>2.4549 & BF0712$lMeanDepth<=4.6683],
+        xlab = "Nutrient color",
+        ylab = "WALA",
+     ylim = c(1, 500000),
+        las = 1,
+     log = "y",
+        main = "Third Zmean quartile")
+plot(BF0712$WALA_ratio[BF0712$lMeanDepth>4.6683] ~ BF0712$nutrient_color[BF0712$lMeanDepth>4.6683],
+        xlab = "Nutrient color",
+        ylab = "WALA",
+     ylim = c(1, 500000),
+        las = 1,
+     log = "y",
+        main = "Fourth Zmean quartile")
+#Divided by mean lake and grouped by same color
+blue.wala = BF0712$WALA_ratio[BF0712$nutrient_color == "blue"] #613
+brown.wala = BF0712$WALA_ratio[BF0712$nutrient_color == "brown"] #117
+green.wala = BF0712$WALA_ratio[BF0712$nutrient_color == "green"] #326
+murky.wala = BF0712$WALA_ratio[BF0712$nutrient_color == "murky"] #190
+Zmean.cat = quantile(BF0712$lMeanDepth, probs = seq(0, 1, 0.25))  
+par(mfrow=c(2,2))
+boxplot(blue.wala ~ Zmean.cat[BF0712$nutrient_color == "blue"],
+        xlab = "Zmean quartiles",
+        ylab = "WALA",
+     ylim = c(1, 500000),
+        las = 1,
+     log = "y",
+        main = "Blue")
+boxplot(brown.wala ~ Zmean.cat[BF0712$nutrient_color == "brown"],
+        xlab = "Zmean quartiles",
+        ylab = "WALA",
+     ylim = c(1, 500000),
+        las = 1,
+     log = "y",
+        main = "Brown")
+boxplot(green.wala ~ Zmean.cat[BF0712$nutrient_color == "green"],
+        xlab = "Zmean quartiles",
+        ylab = "WALA",
+     ylim = c(1, 500000),
+        las = 1,
+     log = "y",
+        main = "Green")
+boxplot(murky.wala ~ Zmean.cat[BF0712$nutrient_color == "murky"],
+        xlab = "Zmean quartiles",
+        ylab = "WALA",
+     ylim = c(1, 500000),
+        las = 1,
+     log = "y",
+        main = "Murky")
+
+#Log WALA values
+WALA_log = log(BF0712$basinarea_km2*100)/log(BF0712$area_km2*100)
+blue.wala.log = WALA_log[BF0712$nutrient_color == "blue"] #613
+brown.wala.log = WALA_log[BF0712$nutrient_color == "brown"] #117
+green.wala.log = WALA_log[BF0712$nutrient_color == "green"] #326
+murky.wala.log = WALA_log[BF0712$nutrient_color == "murky"] #190
+
+par(mfrow=c(2,2))
+boxplot(blue.wala.log  ~ Zmean.cat[BF0712$nutrient_color == "blue"],
+        xlab = "Zmean quartiles",
+        ylab = "WALA",
+    ylim = c(1, 50),
+        las = 1,
+     log = "y",
+        main = "Blue")
+boxplot(brown.wala.log  ~ Zmean.cat[BF0712$nutrient_color == "brown"],
+        xlab = "Zmean quartiles",
+        ylab = "WALA",
+     ylim = c(1, 50),
+        las = 1,
+     log = "y",
+        main = "Brown")
+boxplot(green.wala.log  ~ Zmean.cat[BF0712$nutrient_color == "green"],
+        xlab = "Zmean quartiles",
+        ylab = "WALA",
+     ylim = c(1, 50),
+        las = 1,
+     log = "y",
+        main = "Green")
+boxplot(murky.wala.log  ~ Zmean.cat[BF0712$nutrient_color == "murky"],
+        xlab = "Zmean quartiles",
+        ylab = "WALA",
+        ylim = c(1, 50),
+        las = 1,
+        log = "y",
+        main = "Murky")
+
+#Nutrients
+NP = (BF0712$NTL_ugL/14.0067) / (BF0712$PTL_ugL/30.976762)
+par(mfrow=c(1,3))
+plot(log(BF0712$NTL_ugL/14.0067) ~ BF0712$nutrient_color,
+     xlab = "Nutrient color",
+     ylab = "TN (µmol/L), log values",
+     las = 1,
+     main = "")
+plot(log(NP) ~ BF0712$nutrient_color,
+     xlab = "Nutrient color",
+     ylab = "NP ratio, log transformed",
+     las = 1,
+     main = "")
+abline(h = log(16), lty=2)
+plot(log(BF0712$PTL_ugL/30.973762) ~ BF0712$nutrient_color,
+     xlab = "Nutrient color",
+     ylab = "TP (µmol/L), log values",
+     las = 1,
+     main = "")
+
+par(mfrow=c(1,3))
+plot(BF0712$DSR ~ BF0712$nutrient_color,
+        xlab = "Nutrient color",
+        ylab = "Dynamic sediment ratio",
+     ylim=c(0.02,15),
+     log = "y",
+        las = 1,
+        main = "All lakes")
+boxplot(HTF0712$DSR ~ HTF0712$nutrient_color,
+        xlab = "Nutrient color",
+        ylab = expression(Dynamic~sediment~Ratio[Lake]),
+     ylim=c(0.02,15),
+        las = 1,
+        log = "y",
+        main = "Lake w/ hypolimnion")
+boxplot(HTF0712$DRhypo ~ HTF0712$nutrient_color,
+        xlab = "Nutrient color",
+        ylab = expression(Dynamic~sediment~Ratio[Hypolimnion]),
+     ylim=c(0.02,15),
+        las = 1,
+        log = "y",
+        main = "Hypolimnion")
+
+par(mfrow=c(1,1))
+boxplot(HTF0712$HypoThick ~ HTF0712$nutrient_color,
+        xlab = "Nutrient color",
+        ylab = "Hypolimnion thickness",
+        las = 1,
+        log = "y",
+        main = "Hypolimnion thickness")
+plot(BAF0712$anox ~ BAF0712$nutrient_color,
+        xlab = "Nutrient color",
+        ylab = "",
+        las = 1,
+     main = "Anoxia presence/absence")
+
+
+plot(RAF0712$RAnox0712*100 ~ RAF0712$nutrient_color,
+        xlab = "Nutrient color",
+        ylab = "Anoxia relative volume",
+        las = 1,
+     main = "Anoxia relative volume")
+
+plot(RHF0712$RHypox0712 ~ RHF0712$nutrient_color,
+        xlab = "Nutrient color",
+        ylab = "Hypoxia relative volume",
+        las = 1,
+     main = "Hypoxia relative volume")
+
+
+plot(RAposF0712$RAnox0712 ~ RAposF0712$nutrient_color,
+        xlab = "Nutrient color",
+        ylab = "Anoxia relative volume",
+        las = 1,
+     main = "Anoxia relative volume (non-zeros)")
+
+
+
+par(mfrow=c(1,3))
+plot(BHF0712$hypox ~ BAF0712$nutrient_color,
+        xlab = "Nutrient color",
+        ylab = "",
+        las = 1,
+     main = "Hypoxia presence/absence")
+
+boxplot(RHTF0712$HypoProp ~ RHTF0712$nutrient_color,
+        xlab = "Nutrient color",
+        ylab = "",
+        las = 1,
+        main = "Relative hypolimnion thickness")
+plot(RHposF0712$RHypox0712 ~ RHposF0712$nutrient_color,
+     xlab = "Nutrient color",
+     ylab = "",
+     las = 1,
+     main = "Hypoxia relative volume")
+
+
+
+
+
+ancova.pente = aov(RHposF0712$RHypox0712 ~ RHposF0712$depthmax_m * RHposF0712$nutrient_color)
+summary(ancova.pente) # Pentes différentes entre les couleur de lac
+ancova.inter = aov(RHposF0712$RHypox0712 ~ RHposF0712$depthmax_m + RHposF0712$nutrient_color) 
+summary(ancova.inter) #ordonnées à l'origine différentes
+ancova.base = aov(RHposF0712$RHypox0712 ~ RHposF0712$depthmax_m)
+anova(ancova.pente,ancova.inter) #ancova.inter.model.BDOC is more parcimonious and better
+anova(ancova.inter, ancova.base) #ancova.inter.model.BDOC is better
+
+model.blue = lm(RHposF0712$RHypox0712[RHposF0712$nutrient_color=="blue"] ~ RHposF0712$lMeanDepth[RHposF0712$nutrient_color=="blue"])
+model.brown = lm(RHposF0712$RHypox0712[RHposF0712$nutrient_color=="brown"] ~ RHposF0712$lMeanDepth[RHposF0712$nutrient_color=="brown"])
+model.green = lm(RHposF0712$RHypox0712[RHposF0712$nutrient_color=="green"] ~ RHposF0712$lMeanDepth[RHposF0712$nutrient_color=="green"])
+model.murky = lm(RHposF0712$RHypox0712[RHposF0712$nutrient_color=="murky"] ~ RHposF0712$lMeanDepth[RHposF0712$nutrient_color=="murky"])
+
+RHcol = as.character(RHposF0712[,"nutrient_color"])
+RHcol[RHcol=="murky"] = "black"
+plot(RHposF0712$RHypox0712~ RHposF0712$lMeanDepth,
+     las = 1,
+     col = RHcol,
+     pch = 16,
+     xlab = "Z mean",
+     ylab = "Hypoxia (proportion)")
+abline(model.blue, col = "blue", lwd = 2)
+abline(model.brown, col = "brown", lwd = 2)
+abline(model.green, col = "green", lwd = 2)
+abline(model.murky, col = "black", lwd = 2)
+
+
+#regarder avec hypoxie les lacs stratifiés en permanence
+
+
+```
+#Volumetric O2 demand
+```{r not run}
+
+RelO207 = read.csv("../data/Processed/RelO207.csv", row.names = 1)
+hypo07 = read.csv("../data/Processed/hypo07.csv", row.names = 1)
+metadata.hypo07 = read.csv("../data/Processed/metadata.hypo07.csv", row.names = 1)
+
+
+MF.hypo07 = missForest(metadata.hypo07[,-c(1,2,9,10,11,14,35,36,38)])
+MF.hypo07 = MF.hypo07$ximp
+MF.hypo07[212,"secchi_m"] = MF.hypo07[212,"depthmax_m"]
+MF.hypo07$Transparency = MF.hypo07$secchi_m / MF.hypo07$sampled_depthmax_m
+
+RelO212 = read.csv("../data/Processed/RelO212.csv", row.names = 1)
+hypo12 = read.csv("../data/Processed/hypo12.csv", row.names = 1)
+metadata.hypo12 = read.csv("../data/Processed/metadata.hypo12.csv", row.names = 1)
+colnames(metadata.hypo12)[62] = "RelO2"
+colnames(metadata.hypo12)[63] = "VolT"
+colnames(metadata.hypo12)[67] = "Hypox"
+colnames(metadata.hypo12)[68] = "Anox"
+MF.hypo12 = missForest(metadata.hypo12[,-c(1,2,9,10,11,14,35,36,38)])
+MF.hypo12 = MF.hypo12$ximp
+MF.hypo12$Transparency = MF.hypo12$secchi_m / MF.hypo12$sampled_depthmax_m
+
+
+
+
+#Select useful column
+Selection = c("lat", "lon","area_km2", "elevation_m", "sampled_depthmax_m", "basinarea_km2", "chla_ugL", "NTL_ugL", "PTL_ugL", "DOC_mgL", "secchi_m", "color_PCU", "VolT", "SedArea", "VoltoSedArea", "HypoThick", "WALA_ratio", "pct_forest", "pct_agric", "Julian.day", "nutrient_color", "Hypox", "Anox","Transparency", "RelO2")
+#ratio dynamique: profondeur moyenne/racine3 de l'aire
+data07 = MF.hypo07[,Selection]
+# data07[,c(3:17)] = log(data07[,c(3:17)]+1)
+# data07[,c(3:17)] = scale(data07[,c(3:17)])
+# data07[,c(18,19)] = logit(data07[,c(18,19)])
+
+#TEST
+# data07[which(data07$RelO2 == min(data07$RelO2)),"RelO2"] = 0 #Run 3 times
+# data07$RelO2 = logit(data07$RelO2)
+
+pdf("../output/Distributions07.pdf")
+for(i in 1:20)
+{
+    hist(data07[,i], main = colnames(data07[i]))
+}
+dev.off()
+
+set.seed(110)
+train07 = sample(1:nrow(metadata.hypo07), 130)
+test07 = which(!1:nrow(metadata.hypo07) %in% train07)
+out.mat = matrix(nrow = length(Selection)-1)
+rownames(out.mat) = Selection[-22]
+for(i in 1:(length(Selection)-1))
+{
+  data07.temp = data07[,-i]
+  rf.hypo07 = randomForest(RelO2~., data=data07.temp, subset = train07)
+  rf.test07 = predict(rf.hypo07, newdata = data07.temp[test07,])
+  out.mat[i,1] = mean(abs(data07.temp[test07,"RelO2"] - rf.test07))
+}
+as.matrix(out.mat[order(out.mat, decreasing = T),])
+
+rf.hypo07
+rf.test07 = predict(rf.hypo07, newdata = data07[test07,])
+
+#Combined data sets
+Selection = c("lat", "lon","area_km2", "elevation_m", "sampled_depthmax_m", "basinarea_km2", "chla_ugL", "NTL_ugL", "PTL_ugL", "DOC_mgL", "secchi_m", "color_PCU", "VolT", "SedArea", "VoltoSedArea", "HypoThick", "WALA_ratio", "pct_forest", "pct_agric", "Julian.day", "nutrient_color", "Hypox", "Anox", "Transparency", "RelO2")
+#ratio dynamique: profondeur moyenne/racine3 de l'aire
+data0712 = rbind(MF.hypo07[,Selection], MF.hypo12[,Selection])
+data0712$DOC_umol = data0712$DOC_mgL/12.0107*1000
+data0712$NTL_umol = data0712$NTL_ugL/14.0067
+data0712$PTL_umol = data0712$PTL_ugL/30.973762
+data0712$RatioNP = log(data0712$NTL_umol) / log(data0712$PTL_umol)
+
+data0712 = cbind(data0712[,-c(8,9,10,25)], RelO2=data0712[,"RelO2"])
+
+# data0712[,c(3:17)] = log(data0712[,c(3:17)]+1)
+# data0712[,c(3:17,21,22,23)] = scale(data0712[,c(3:17,21,22,23)])
+# data0712[,c(18,19)] = logit(data0712[,c(18,19)])
+
+set.seed(101)
+train0712 = sample(1:nrow(data0712), 0.6*nrow(data0712))
+test0712 = which(!1:nrow(data0712) %in% train0712)
+out.mat = matrix(nrow = dim(data0712)[2])
+rownames(out.mat) = c("All", colnames(data0712)[-length(colnames(data0712))])
+rf.hypo0712 = randomForest(RelO2~., data=data0712, subset = train0712)
+rf.test0712 = predict(rf.hypo0712, newdata = data0712[test0712,])
+out.mat[1,1] = mean(abs(data0712[test0712,"RelO2"] - rf.test0712))
+for(i in 1:(dim(data0712)[2]-1))
+{
+  data0712.temp = data0712[,-i]
+  rf.hypo0712 = randomForest(RelO2~., data=data0712.temp, subset = train0712)
+  rf.test0712 = predict(rf.hypo0712, newdata = data0712.temp[test0712,])
+  out.mat[i+1,1] = mean(abs(data0712.temp[test0712,"RelO2"] - rf.test0712))
+}
+as.matrix(out.mat[order(out.mat, decreasing = T),])
+
+summary(lm(rf.test0712 ~ data0712[test0712,"RelO2"]))
+plot(rf.test0712 ~ data0712[test0712,"RelO2"],
+     xlab = expression(Calculted~O[2]~deficit),
+     # xlim = c(-4,4),
+     # ylim = c(-2,3),
+     ylab = expression(Predicted~O[2]~deficit),
+     las = 1)
+abline(lm(rf.test0712 ~ data0712[test0712,"RelO2"]))
+
+
+rtparty0712 = ctree(RelO2 ~ ., data=data0712, controls=cforest_control(mtry=2, mincriterion=0))
+pdf("../output/tree0712.pdf", width = 30, height = 15)
+plot(rtparty0712)
+dev.off()
+
+#Test with very few variables
+Sub.select = c("NTL_umol", "sampled_depthmax_m", "secchi_m", "WALA_ratio", "DOC_umol", "PTL_umol", "chla_ugL", "Julian.day", "VolT","pct_forest", "Transparency", "RelO2")#"Hypox"
+
+all.pairs = list()
+counter = 1
+for(i in 1:(length(Sub.select)-2))
+{
+  for(j in (i+1):(length(Sub.select)-1))
+  {
+    #if(j==length(Sub.select)-1) break
+    pair = c(i,j)
+    all.pairs[[counter]] = pair
+    counter = counter+1
+  }
+}
+
+sub.data0712 = data0712[,Sub.select]
+set.seed(101)
+train0712 = sample(1:nrow(sub.data0712), 0.6*nrow(sub.data0712))
+test0712 = which(!1:nrow(sub.data0712) %in% train0712)
+out.mat = matrix(nrow = length(all.pairs)+1)
+rownames(out.mat) = rep("All",length(all.pairs)+1)
+
+rf.hypo0712.main = randomForest(RelO2~., data=sub.data0712, subset = train0712)
+rf.test0712.main = predict(rf.hypo0712.main, newdata = sub.data0712[test0712,])
+out.mat[1,1] = mean(abs(sub.data0712[test0712,"RelO2"] - rf.test0712.main))
+
+for(i in 1:length(all.pairs))
+{
+  sub.data0712.temp = sub.data0712[,-all.pairs[[i]]]
+  rf.hypo0712 = randomForest(RelO2~., data=sub.data0712.temp, subset = train0712)
+  rf.test0712 = predict(rf.hypo0712, newdata = sub.data0712.temp[test0712,])
+  out.mat[i+1,1] = mean(abs(sub.data0712.temp[test0712,"RelO2"] - rf.test0712))
+  rownames(out.mat)[i+1] = paste(colnames(sub.data0712)[all.pairs[[i]]][1],colnames(sub.data0712)[all.pairs[[i]]][2],sep="-")
+}
+as.matrix(out.mat[order(out.mat, decreasing = T),])
+plot(rf.test0712.main ~ sub.data0712[test0712,"RelO2"])
+summary(lm(rf.test0712.main ~ sub.data0712[test0712,"RelO2"]))
+
+rtparty0712 = ctree(RelO2 ~ ., data=sub.data0712, controls=cforest_control(mtry=2, mincriterion=2))
+plot(rtparty0712)
+
+rfparty0712 = cforest(RelO2 ~ ., data=sub.data0712, controls=cforest_control(mtry=2, mincriterion=0))
+varimp(rfparty0712)[order(varimp(rfparty0712),decreasing = T)]
+
+
+rfparty07 = cforest(RelO2 ~ ., data=data07, controls=cforest_control(mtry=2, mincriterion=0))
+rtparty07 = ctree(RelO2 ~ ., data=data07, controls=cforest_control(mtry=2, mincriterion=0), )
+getwd()
+pdf("../output/tree.pdf", width = 30, height = 15)
+plot(rtparty07)
+dev.off()
+
+varimp(rfparty07, )[order(varimp(rfparty07),decreasing = T)]
+
+
+summary(lm(predict(rfparty07)~data07$RelO2))
+plot(predict(rfparty07) ~ data07$RelO2,
+     xlab = "Calculted O2 deficit (logit transformed)",
+     xlim = c(-4,4),
+     ylim = c(-2,3),
+     ylab = "Predicted O2 deficit (logit transformed)",
+     las = 1)
+abline(lm(predict(rfparty07)~data07$RelO2))
+
+
+
+data12 = metadata.hypo12[,Selection]
+
+
+rfparty12 = cforest(RelO2 ~ ., data=data12, controls=cforest_control(mtry=2, mincriterion=0))
+summary(lm(predict(rfparty12)~RelO212[,1]))
+plot(predict(rfparty12) ~ RelO212[,1],
+     xlab = "Calculted O2 deficit (%)",
+     ylab = "Predicted O2 deficit (%)",
+     las = 1)
+
+rfparty0712 = cforest(RelO2 ~ ., data=rbind(data07,data12), controls = cforest_control(mtry=2, mincriterion=0))
+summary(lm(predict(rfparty0712)~c(RelO207[,1],RelO212[,1])))
+plot(predict(rfparty0712) ~ c(RelO207[,1],RelO212[,1]),
+     xlab = "Calculted O2 deficit (%)",
+     ylab = "Predicted O2 deficit (%)",
+     las = 1)
+
+oob.err = double(13)
+test.err = double(13)
+
+for(mtry in 1:19){
+  fit = randomForest(RelO2~., data = data07, subset=train07, mtry=mtry, ntree = 130)
+  oob.err[mtry] = fit$mse[130]
+  pred = predict(fit, data07[-train07,])
+  test.err[mtry] = with(data07[-train07,], mean( (data07[-train07,"RelO2"]-pred)^2))
+}
+
+matplot(1:mtry, cbind(test.err, oob.err), pch = 23, col = c("red", "blue"), type = "b", ylab="Mean Squared Error")
+legend("topright", legend = c("Test", "OOB"), pch = 23, col = c("red", "blue"))
+```
+
+#Someresults.pptx
+```{r}
+#Slide 1 - Hypolimnion p/a machine learning
+
+png("../Lab meeting presentation/BinHypoRF.png")
+plot(rf.bt0712 ~ BF0712[test0712,"Binhypo"],
+     xlab = expression(Presence/absence~hypolimnion),
+     # xlim = c(-4,4),
+     # ylim = c(-2,3),
+     ylab = expression(Predicted~presence/absence~hypolimnion),
+     las = 1)
+dev.off()
+
+rtparty0712 = ctree(Binhypo ~ ., data=BF0712[test0712,], controls=cforest_control(mtry=NULL, mincriterion=3))
+#pdf("../output/tree0712.pdf", width = 30, height = 15)
+png("../Lab meeting presentation/BinHypoTree.png")
+plot(rtparty0712)
+dev.off()
+
+#Slide 2 - Hypolimnion p/a logistic regression
+bin.logreg = as.numeric(BF0712$Binhypo)-1
+
+myreg_mean=glm(bin.logreg ~ BF0712$lMeanDepth, family=binomial(link=logit))
+logit_ypredit.mean=0.6532*BF0712$lMeanDepth-2.5944 #Coefficient dans le summary
+ypredit.mean=exp(logit_ypredit.mean)/(1+ exp(logit_ypredit.mean))
+o.mean=order(BF0712$lMeanDepth)
+
+myreg_max=glm(bin.logreg ~ BF0712$MaxDepth, family=binomial(link=logit))
+logit_ypredit.max=0.23033*BF0712$MaxDepth-2.56593
+ypredit.max=exp(logit_ypredit.max)/(1+ exp(logit_ypredit.max))
+o.max=order(BF0712$MaxDepth)
+
+myreg_P=glm(bin.logreg ~ BF0712$PTL_ugL, family=binomial(link=logit))
+logit_ypredit.P=-0.006522*BF0712$PTL_ugL-0.035451
+ypredit.P=exp(logit_ypredit.P)/(1+ exp(logit_ypredit.P))
+o.P=order(BF0712$PTL_ugL)
+
+png("../Lab meeting presentation/BinHypoRegLog.png", width = 14, height = 6, units = "in", res = 300 )
+par(mfrow = c(1,3))
+plot(bin.logreg ~ BF0712$lMeanDepth,
+     las = 1,
+     xlab = "Lake mean depth (m)",
+     ylab = "Absence-presence of hypolimnion",
+     cex.lab = 1.8,
+     cex.axis = 1.8)
+points(BF0712$lMeanDepth[o.mean],ypredit.mean[o.mean], col="red", type="l", lwd=2)
+
+plot(bin.logreg ~ BF0712$MaxDepth,
+     las = 1,
+     xlab = "Lake maximum depth (m)",
+     ylab = "Absence-presence of hypolimnion",
+     cex.lab = 1.8,
+     cex.axis = 1.8)
+points(BF0712$MaxDepth[o.max],ypredit.max[o.max], col="red", type="l", lwd=2)
+
+plot(bin.logreg ~ BF0712$PTL_ugL,
+     las = 1,
+     xlab = "Total phosphorus (ugL)",
+     ylab = "Absence-presence of hypolimnion",
+     cex.lab = 1.8,
+     cex.axis = 1.8)
+points(BF0712$PTL_ugL[o.P],ypredit.P[o.P], col="red", type="l", lwd=2)
+dev.off()
+
+#Slide 3 - hypolimnion thickness RF
+HTcol = as.character(HTF0712[test0712,"nutrient_color"])
+HTcol[HTcol=="murky"] = "black"
+
+png("../Lab meeting presentation/HypoThickRF.png", width = 14, height = 6, units = "in", res = 300 )
+plot(rf.HTFt0712 ~ HTF0712[test0712,"HypoThick"],
+     xlab = expression(Hypolimnion~thickness),
+     # xlim = c(-4,4),
+     # ylim = c(-2,3),
+     ylab = expression(Predicted~hypolimnion~thickness),
+     las = 1,
+     col = HTcol,
+     pch = 16) #R² = 0.78
+dev.off()
+png("../Lab meeting presentation/HypoThickTree.png", width = 14, height = 6, units = "in", res = 300 )
+plot(rtparty.HT0712)
+dev.off()
+
+#Slide 4 - hypolimnion thickness regression
+HTcol.full = as.character(HTF0712[,"nutrient_color"])
+HTcol.full[HTcol.full=="murky"] = "black"
+
+png("../Lab meeting presentation/HypoThicklm.png", width = 14, height = 6, units = "in", res = 300 )
+par(mar=c(5,5,4,1)+0.1)
+plot(HTF0712[,"HypoThick"] ~ HTF0712[,"sampled_depthmax_m"],
+     xlab = "Max depth (m)",
+     # xlim = c(-4,4),
+     # ylim = c(-2,3),
+     ylab = expression(Hypolimnion~thickness~(m)),
+     las = 1,
+     col = HTcol.full,
+     pch = 16,
+     cex.lab = 1.6,
+     cex.axis = 1.6,
+     cex = 1.2) #R² = 0.90
+dev.off()
+
+#Slide 5 - Hypolimnion proportion RF
+HypoProp.col = as.character(RHTF0712[test0712,"nutrient_color"])
+HypoProp.col[HypoProp.col=="murky"] = "black"
+png("../Lab meeting presentation/RelhypoThickRF.png", width = 14, height = 6, units = "in", res = 300 )
+par(mar=c(5,5,4,1)+0.1)
+plot(rf.RHTFt0712 ~ RHTF0712[test0712,"HypoProp"],
+     xlab = expression(Relative~hypolimnion~thickness),
+     # xlim = c(-4,4),
+     # ylim = c(-2,3),
+     ylab = expression(Predicted~relative~hypolimnion~thickness),
+     las = 1,
+     col = HypoProp.col,
+     pch = 16,
+     cex.lab = 1.6,
+     cex.axis = 1.6,
+     cex = 1.2)
+dev.off()
+
+
+#png("../Lab meeting presentation/RelhypoThickTree.png", width = 14, height = 6, units = "in", res = 300 )
+pdf("../Lab meeting presentation/RelhypoThickTree.pdf", width = 14, height = 6)
+plot(rtparty.RHT0712)
+dev.off()
+
+
+#Slide 6 - Hypolimnion proportion regression
+HypoProp.col.full = as.character(RHTF0712[,"nutrient_color"])
+HypoProp.col.full[HypoProp.col.full=="murky"] = "black"
+png("../Lab meeting presentation/RelhypoThickReg.png", width = 14, height = 6, units = "in", res = 300 )
+par(mar=c(5,5,4,1)+0.1)
+plot(RHTF0712$HypoProp~ RHTF0712$lMeanDepth,
+     xlab = expression(Mean~lake~depth~(m)),
+     # xlim = c(-4,4),
+     # ylim = c(-2,3),
+     ylab = expression(Relative~hypolimnion~thickness (m)),
+     las = 1,
+     col = HypoProp.col.full,
+     pch = 16,
+     cex.lab = 1.6,
+     cex.axis = 1.6,
+     cex = 1.2)
+dev.off()
+
+#Slide 7 - Anoxia
+Anox.col = as.character(RAF0712[test0712,"nutrient_color"])
+Anox.col[Anox.col=="murky"] = "black"
+png("../Lab meeting presentation/RelAnoxVol.png", width = 14, height = 6, units = "in", res = 300 )
+par(mar=c(5,5,4,1)+0.1)
+plot(rf.RAFt0712 ~ RAF0712[test0712,"RAnox0712"],
+     xlab = expression(Relative~anoxia~volume),
+     # xlim = c(-4,4),
+     # ylim = c(-2,3),
+     ylab = expression(Predicted~relative~anoxia~volume),
+     las = 1,
+     col = Anox.col,
+     pch = 16,
+     cex.lab = 1.6,
+     cex.axis = 1.6,
+     cex = 1.2)
+dev.off()
+
+#Slide 8 - Hypoxia
+Hypox.col = as.character(RHF0712[test0712,"nutrient_color"])
+Hypox.col[Hypox.col=="murky"] = "black"
+png("../Lab meeting presentation/RelHypoxVol-RF.png", width = 14, height = 6, units = "in", res = 300 )
+par(mar=c(5,5,4,1)+0.1)
+plot(rf.RHFt0712 ~ RHF0712[test0712,"RHypox0712"],
+     xlab = expression(Relative~anoxia~volume),
+     # xlim = c(-4,4),
+     # ylim = c(-2,3),
+     ylab = expression(Predicted~relative~anoxia~volume),
+     las = 1,
+     col = Hypox.col,
+     pch = 16,
+     cex.lab = 1.6,
+     cex.axis = 1.6,
+     cex = 1.2)
+dev.off()
+
+png("../Lab meeting presentation/RelHypoxVol-Tree.png", width = 14, height = 6, units = "in", res = 300 )
+plot(rtparty.HT0712)
+dev.off()
+
+#Slide 9 - Hypoxia Reg
+Hypox.col.full = as.character(RHF0712$nutrient_color)
+Hypox.col.full[Hypox.col.full=="murky"] = "black"
+png("../Lab meeting presentation/RelHypoxVol-Reg.png", width = 14, height = 6, units = "in", res = 300 )
+par(mar=c(5,5,4,1)+0.1)
+plot(RHF0712$RHypox0712 ~ RHF0712$Transparency,
+     xlab = expression(Relative~transparency),
+     # xlim = c(-4,4),
+     # ylim = c(-2,3),
+     ylab = expression(Relative~hypoxia~volume),
+     las = 1,
+     col = Hypox.col,
+     pch = 16,
+     cex.lab = 1.6,
+     cex.axis = 1.6,
+     cex = 1.2)
+dev.off()
+```
+
+#Preliminary graph: profiles
+```{r}
+pdf(file = paste0("../output/2007/AllProfiles.pdf"), width = 14, height = 4)
+for(i in 1:length(allfiles07)){
+  data = read.csv(paste0("../data/2007/", allfiles07[i]))
+  
+   if(length(unique(data$temp) == "NA") == 1) data$temp = 1
+
+  filename = unlist(strsplit(allfiles07[i],split = "[.]"))[1]
+  
+  density = rLakeAnalyzer::water.density(data$temp, sal = data$temp * 0)
+  
+
+  par(mfrow=c(1,3))
+  par(mar=c(5,5,4,1)+0.1)
+  plot(data$depth~data$temp,
+     ylim = rev(range(data$depth)),
+     las = 1,
+     xlab = "Temperature (°C)",
+     ylab = "Depth (m)",
+     pch = 16,
+     col = "red",
+     cex = 1.8,
+     cex.axis = 1.8,
+     cex.lab = 1.8)
+  mtext(paste(filename), side = 3, at = max(data$temp[!is.nan(data$temp)]), cex = 1.8)
+  if(strata07[2,i] != -1) abline(h = strata07[2,i], lty=2, lwd=2, col = "blue")
+  if(strata07[3,i] != -1) abline(h = strata07[3,i], lty=2, lwd=2, col = "blue")
+  
+  plot(data$depth~density,
+     ylim = rev(range(data$depth)),
+     las = 1,
+     xlab = "Density",
+     ylab = "Depth (m)",
+     pch = 16,
+     col = "green",
+     cex = 1.8,
+     cex.axis = 1.8,
+     cex.lab = 1.8)
+  if(strata07[2,i] != -1) abline(h = strata07[2,i], lty=2, lwd=2, col = "blue")
+  if(strata07[3,i] != -1) abline(h = strata07[3,i], lty=2, lwd=2, col = "blue")
+  
+  plot(data$depth~data$DO,
+     ylim = rev(range(data$depth)),
+     las = 1,
+     xlim = c(0,12),
+     xlab = "Oxygen (mg/L)",
+     ylab = "Depth (m)",
+     pch = 16,
+     col = "gold",
+     cex = 1.8,
+     cex.axis = 1.8,
+     cex.lab = 1.8)
+  if(strata07[2,i] != -1) abline(h = strata07[2,i], lty=2, lwd=2, col = "blue")
+  if(strata07[3,i] != -1) abline(h = strata07[3,i], lty=2, lwd=2, col = "blue")
+}
+dev.off()
+
+pdf(file = paste0("../output/2012/AllProfiles.pdf"), width = 14, height = 4)
+for(i in 1:length(allfiles12)){
+  data = read.csv(paste0("../data/2012/", allfiles12[i]))
+  if(length(unique(data$temp) == "NA") == 1) data$temp = 1
+  filename = unlist(strsplit(allfiles12[i],split = "[.]"))[1]
+  
+  density = rLakeAnalyzer::water.density(data$temp, sal = data$temp * 0)
+  
+
+  par(mfrow=c(1,3))
+  par(mar=c(5,5,4,1)+0.1)
+  plot(data$depth~data$temp,
+     ylim = rev(range(data$depth)),
+     las = 1,
+     xlab = "Temperature (°C)",
+     ylab = "Depth (m)",
+     pch = 16,
+     col = "red",
+     cex = 1.8,
+     cex.axis = 1.8,
+     cex.lab = 1.8)
+  mtext(paste(filename), side = 3, at = max(data$temp[!is.nan(data$temp)]), cex = 1.8)
+  if(strata12[2,i] != -1) abline(h = strata12[2,i], lty=2, lwd=2, col = "blue")
+  if(strata12[3,i] != -1) abline(h = strata12[3,i], lty=2, lwd=2, col = "blue")
+  
+  plot(data$depth~density,
+     ylim = rev(range(data$depth)),
+     las = 1,
+     xlab = "Density",
+     ylab = "Depth (m)",
+     pch = 16,
+     col = "green",
+     cex = 1.8,
+     cex.axis = 1.8,
+     cex.lab = 1.8)
+  if(strata12[2,i] != -1) abline(h = strata12[2,i], lty=2, lwd=2, col = "blue")
+  if(strata12[3,i] != -1) abline(h = strata12[3,i], lty=2, lwd=2, col = "blue")
+  
+  plot(data$depth~data$DO,
+     ylim = rev(range(data$depth)),
+     las = 1,
+     xlim = c(0,12),
+     xlab = "Oxygen (mg/L)",
+     ylab = "Depth (m)",
+     pch = 16,
+     col = "gold",
+     cex = 1.8,
+     cex.axis = 1.8,
+     cex.lab = 1.8)
+  if(strata12[2,i] != -1) abline(h = strata12[2,i], lty=2, lwd=2, col = "blue")
+  if(strata12[3,i] != -1) abline(h = strata12[3,i], lty=2, lwd=2, col = "blue")
+}
+dev.off()
+
+heat.test = cbind(BF0712[,c(17,20, 10, 23)], Binhypo=as.numeric(BF0712$Binhypo))
+par(mfrow = c(1,3))
+plot(x = heat.test[,2], y = heat.test[,1],
+     xlab = "Max depth",
+     ylab = "Mean depth",
+     las = 1,
+     col = heat.test$Binhypo, pch = 16, log ="xy")
+
+plot(x = heat.test[,2], y = heat.test[,3],
+     xlab = "Max depth",
+     ylab = "Secchi",
+     las = 1,
+     col = heat.test$Binhypo, pch = 16, log ="xy")
+
+plot(x = heat.test[,2], y = heat.test[,4],
+     xlab = "Max depth",
+     ylab = "Dynamic sediment ratio",
+     las=1,
+     col = heat.test$Binhypo, pch = 16, log ="xy")
+```
